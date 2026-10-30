@@ -1,4 +1,5 @@
 import argparse
+import requests
 
 from pathlib import Path
 from agentic_cad.example import MockAgent
@@ -28,7 +29,7 @@ def main(args):
         print(f"processing {p}")
         prompt = read_txt(p)
         img = read_img(p.with_suffix(".jpg"))
-        output_path = DEFAULT_OUTPUTS / f"{p.stem}.stp"
+        output_path = args.output_dir / f"{p.stem}.stp"
         agent.generate_cad(prompt=prompt, img=img, output_path=output_path)
 
     print("Pipeline generated all CAD designs")
