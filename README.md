@@ -49,6 +49,11 @@ You are free to adjust the workflow to your needs, i.e. using `dev` branches and
 
 # VM Access
 
+todo: recommended workflows for llm hosting & vm access
+- show examples of how to access the brev platform and host i) an llm, ii) an agent. 
+- setup ssh tunneling access served llm endpoints on local machine + local docker
+
+
 # Evaluation
 
 The eval pipeline is hidden from the participants, and will run automatically in the background upon each new submission bundle, i.e. each new set of docker image + .stp files pushed to the submission registries. Scores are computed and stored in the leaderboard, which will be visible to everyone. Race other teams to the top by submitting new pipelines and improving your agent's performance!
