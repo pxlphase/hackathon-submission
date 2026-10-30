@@ -28,7 +28,7 @@ artifacts
 │   └── ...
 ```
 
-Each test case consists of a text prompt and an image input. Your agent workflow should process each test case and generate a corresponding .stp file in the `outputs` directory. The naming convention is `test_case_<n>.stp` where `<n>` is the test case number. <b><u>This naming convention is strict</b></u>. You should commit the output files (overwrite).
+Each test case consists of a text prompt and an image input. Your agent workflow should process each test case and generate a corresponding .stp file in the `outputs` directory. The naming convention is `test_case_<n>.stp` where `<n>` is the test case number. <b><u>This naming convention is strict</u></b>. You should commit the output files (overwrite).
 
 We have provided [artifacts/example_outputs](./artifacts/example_outputs) as reference for the expected output format.
 
