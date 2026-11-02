@@ -6,6 +6,33 @@ Your challenge: Build an autonomous agent capable of turning natural language in
 
 # Setup
 
+Each team works in its own **private** repository, created from this template under one of your
+GitHub accounts (or your own GitHub organisation). Organisers don't need access to it: submissions
+are made from your CI to our container registry and bucket, using credentials we give you.
+
+1. Create your repo from this template, and keep it private:
+
+   ```sh
+   gh repo create <your-account>/<team>-submission --private --clone \
+       --template sphere-energy/hackathon-submission
+   ```
+
+   or use **Use this template → Create a new repository** on GitHub.
+2. Add your teammates under **Settings → Collaborators**.
+3. The organisers will send you two files: `<team>.vars.env` and `<team>.secrets.env`. From inside
+   your repo, load them into GitHub Actions:
+
+   ```sh
+   gh variable set -f <team>.vars.env
+   gh secret set -f <team>.secrets.env
+   ```
+
+   Then delete `<team>.secrets.env`, and never commit it. Until these are set, CI runs tests but
+   skips submitting.
+
+CI runs on your account's GitHub Actions minutes (2,000/month free for private repos on a personal
+account).
+
 # Repo overview
 
 # Submission format
@@ -43,7 +70,12 @@ The repo is set up to faciliate the submission of your agent workflow with the i
 5. Upon successful merge to `main`, CI will i) rebuild the docker image, ii) push the image to the submission container registry (ECR), and iii) upload your committed output .stp files to the submission bucket (S3). 
 6. Our eval pipeline will detect the new submission and run the evaluation automatically, updating the leaderboard with your score.
 
-You are free to adjust the workflow to your needs, i.e. using `dev` branches and only merging stable versions to `main` etc. The current CI boilerplate is setup to push built images to the submission registry upon each successful merge to the `main` branch. You can also push images to the submission registry manually by running `source ./.ci/push.sh` from the root of the repo.
+You are free to adjust the workflow to your needs, i.e. using `dev` branches and only merging stable versions to `main` etc. The current CI boilerplate is setup to push built images to the submission registry upon each successful merge to the `main` branch. You can also submit manually from the root of the repo, with the organisers' files loaded into your environment:
+
+```sh
+set -a; source <team>.vars.env; source <team>.secrets.env; set +a
+./.ci/push.sh
+```
 
 <u><b>Ensure you do not alter the submission format however</b></u>. Submissions in unexpected formats will fail to be evaluated and will not be scored.
 

@@ -17,6 +17,11 @@ if [[ -n "$(git status --porcelain)" ]]; then
     exit 1
 fi
 
+if ! compgen -G "artifacts/outputs/test_case_*.stp" >/dev/null; then
+    echo "No artifacts/outputs/test_case_*.stp to submit." >&2
+    exit 1
+fi
+
 COMMIT=$(git rev-parse HEAD)
 IMAGE="$ECR_REPOSITORY_URI:$COMMIT"
 SUBMISSION="$S3_SUBMISSION_URI/$COMMIT"

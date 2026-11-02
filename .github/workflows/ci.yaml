@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,7 +24,8 @@ jobs:
       - run: docker build .
 
   submit:
-    if: github.event_name == 'push'
+    # Skipped until the team has set the variables/secrets from the organisers
+    if: github.event_name == 'push' && vars.ECR_REPOSITORY_URI != ''
     needs: test
     runs-on: ubuntu-latest
     concurrency: submit
