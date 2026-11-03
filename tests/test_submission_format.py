@@ -15,7 +15,6 @@ def test_inputs_found():
     assert TEST_CASES, f"no test_case_<n>.txt inputs found in {INPUTS}"
 
 
-@pytest.mark.skipif(not HAS_OUTPUTS, reason="no outputs committed yet")
 @pytest.mark.parametrize("test_case", TEST_CASES)
 def test_output_exists(test_case):
     output = OUTPUTS / f"{test_case}.stp"
