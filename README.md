@@ -80,11 +80,88 @@ set -a; source <team>.vars.env; source <team>.secrets.env; set +a
 
 <u><b>Ensure you do not alter the submission format however</b></u>. Submissions in unexpected formats will fail to be evaluated and will not be scored.
 
+# Runtime limits
+
+Your pipeline is run under these limits during evaluation:
+
+| Limit | Value |
+| --- | --- |
+| Wall-clock time | **10 minutes** end to end, for the full run over all test cases |
+| GPU | One NVIDIA RTX PRO 6000 |
+| VRAM | **96 GB** in total. Everything your pipeline runs on the GPU (models, KV cache, CAD tooling) must fit in this |
+
+Test your pipeline end to end on a single RTX PRO 6000 before you submit, and leave some headroom
+on both time and memory.
+
 # VM Access
 
-todo: recommended workflows for llm hosting & vm access
-- show examples of how to access the brev platform and host i) an llm, ii) an agent. 
-- setup ssh tunneling access served llm endpoints on local machine + local docker
+VMs are provided through [NVIDIA Brev](https://brev.nvidia.com). For anything not covered here,
+see the [Brev docs](https://docs.nvidia.com/brev/latest/).
+
+## Install and log in
+
+Follow [CLI getting started](https://docs.nvidia.com/brev/latest/cli/getting-started). In short:
+
+```sh
+# macOS
+brew install brevdev/homebrew-brev/brev
+
+# Linux / WSL (don't run with sudo)
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/brevdev/brev-cli/main/bin/install-latest.sh)"
+
+brev --version
+brev login            # opens a browser to sign in
+```
+
+## Connect to your instance
+
+See [CLI connectivity](https://docs.nvidia.com/brev/latest/cli/connectivity) and
+[instance management](https://docs.nvidia.com/brev/latest/cli/instance-management).
+
+```sh
+brev list                       # list instances in your org
+brev shell <instance>           # open a shell (alias: brev ssh)
+brev open <instance>            # open in VS Code (or: brev open <instance> cursor)
+brev exec <instance> "nvidia-smi"
+```
+
+`brev` manages your SSH config for you, so a plain `ssh <instance>` also works. Run `brev refresh`
+if you created the instance in the web console, or if you restarted it (its IP may have changed).
+
+## Hosting an LLM and tunnelling to it
+
+You can serve a model on your Brev instance (for example with [vLLM](https://docs.vllm.ai)) and
+reach it from your laptop through an SSH tunnel:
+
+```sh
+# On the instance: serve an OpenAI-compatible API on port 8000
+vllm serve <model> --port 8000 --api-key <your-key>
+
+# On your laptop: forward local port 8000 to port 8000 on the instance
+brev port-forward <instance> --port 8000:8000
+# or with plain ssh:
+ssh -N -L 8000:localhost:8000 <instance>
+```
+
+The endpoint is now at `http://localhost:8000/v1` on your laptop. If you run your agent in a local
+Docker container, `localhost` points at the container itself, not your laptop. Use
+`http://host.docker.internal:8000/v1` instead. On Linux, also pass
+`--add-host=host.docker.internal:host-gateway` to `docker run`.
+
+`brev port-forward` takes one port mapping per command. Run it once for each port you need.
+
+## LLM endpoint during evaluation
+
+The eval passes your container an LLM endpoint as two environment variables:
+
+- `LLM_BASE_URL`: an OpenAI-compatible base URL, for example a gateway you run, a hosted
+  OpenAI-compatible API, or vLLM on your eval box.
+- `LLM_API_KEY`: the key for that endpoint.
+
+Read both from the environment in your agent. Don't hardcode `localhost` or your own keys.
+
+**You must keep your own endpoint up and reachable until judging ends.** If it goes down, your
+evaluation runs will fail.
 
 
 # Evaluation
