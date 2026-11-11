@@ -86,7 +86,7 @@ Your pipeline is run under these limits during evaluation:
 
 | Limit | Value |
 | --- | --- |
-| Wall-clock time | **10 minutes** end to end, for the full run over all test cases |
+| Wall-clock time | **20 minutes** end to end, for the full run over all test cases |
 | GPU | One NVIDIA RTX PRO 6000 |
 | VRAM | **96 GB** in total. Everything your pipeline runs on the GPU (models, KV cache, CAD tooling) must fit in this |
 
