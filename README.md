@@ -45,18 +45,62 @@ The `artifacts` structure should be:
 ```
 artifacts
 ├── inputs
-│   ├── test_case_1.txt
-│   ├── test_case_1.jpg
-│   ├── test_case_2.txt
-│   ├── test_case_2.jpg
-│   └── ...
+│   ├── test_case_1
+│   │   ├── description.md
+│   │   ├── context.png          (only for some test cases, see below)
+│   │   └── images
+│   │       ├── view_0_front.png
+│   │       ├── ...
+│   │       └── view_7_iso_back_left_bottom.png
+│   ├── test_case_2
+│   └── ...                      (9 test cases)
 ├── outputs
 │   ├── test_case_1.stp
 │   ├── test_case_2.stp
 │   └── ...
 ```
 
-Each test case consists of a text prompt and an image input. Your agent workflow should process each test case and generate a corresponding .stp file in the `outputs` directory. The naming convention is `test_case_<n>.stp` where `<n>` is the test case number. <b><u>This naming convention is strict</u></b>. You should commit the output files (overwrite).
+## Inputs
+
+Each test case is one mechanical part, given as a written design brief and rendered views:
+
+| file | contents |
+| --- | --- |
+| `description.md` | design brief: function, envelope, features with exact dimensions in mm |
+| `images/view_*.png` | 8 orthographic views of the part, 1024 px |
+| `context.png` | the part highlighted in orange inside its assembly. **Optional**: only present for parts taken from an assembly, so your pipeline must work without it |
+
+All views are orthographic and rendered in the part's own X/Y/Z frame:
+
+| file | camera |
+| --- | --- |
+| `view_0_front` | looking along +Y: X to the right, Z up |
+| `view_1_back` | looking along -Y: X to the left, Z up |
+| `view_2_left` | looking along +X: Y to the left, Z up |
+| `view_3_right` | looking along -X: Y to the right, Z up |
+| `view_4_top` | looking along -Z: X to the right, Y up |
+| `view_5_bottom` | looking along +Z: X to the right, Y down |
+| `view_6_iso_front_right_top` | isometric from +X, -Y, +Z |
+| `view_7_iso_back_left_bottom` | isometric from -X, +Y, -Z |
+
+Positions in `description.md` are in mm from the minimum corner of the part's bounding box.
+
+The inputs committed here are the **practice set**: the leaderboard scores your outputs for these
+parts live during the hackathon. The final ranking re-runs the top teams' images on a **hidden
+set** of 9 different parts, in exactly this format (3 simple, 3 medium, 3 complex). Build for
+parts you haven't seen, not for these 9.
+
+## Outputs
+
+Your agent workflow should process each test case and generate a corresponding .stp file in the
+`outputs` directory: one solid per test case, in millimetres. The naming convention is
+`test_case_<n>.stp` where `<n>` is the test case number. <b><u>This naming convention is
+strict</u></b>, including the `.stp` extension. A missing, broken or non-solid file scores 0 for
+that test case. Position and orientation do not matter; size and handedness do. You should commit
+the output files (overwrite).
+
+Your image is run as `python scripts/main.py --input_dir <inputs> --output_dir <outputs>`, with
+`<inputs>` laid out like `artifacts/inputs`. Keep that entrypoint and those arguments.
 
 We have provided [artifacts/example_outputs](./artifacts/example_outputs) as reference for the expected output format.
 
