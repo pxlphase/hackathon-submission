@@ -48,6 +48,7 @@ artifacts
 │   ├── test_case_1
 │   │   ├── description.md
 │   │   ├── context.png          (only for some test cases, see below)
+│   │   ├── facts.json
 │   │   └── images
 │   │       ├── view_0_front.png
 │   │       ├── ...
@@ -69,6 +70,7 @@ Each test case is one mechanical part, given as a written design brief and rende
 | `description.md` | design brief: function, envelope, features with exact dimensions in mm |
 | `images/view_*.png` | 8 orthographic views of the part, 1024 px |
 | `context.png` | the part highlighted in orange inside its assembly. **Optional**: only present for parts taken from an assembly, so your pipeline must work without it |
+| `facts.json` | measurements the brief was written from: bounding box, volume, hole/fillet inventory, ... |
 
 All views are orthographic and rendered in the part's own X/Y/Z frame:
 
