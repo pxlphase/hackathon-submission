@@ -1,3 +1,6 @@
 .venv
 **/__pycache__
 .git
+# Settings must come from the Dockerfile and the handed-over <team>.env, never a local file
+.env
+*.env

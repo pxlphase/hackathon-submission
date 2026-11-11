@@ -21,4 +21,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Agent settings, frozen with your commit (README: Configuration). After code freeze, the values in
+# your handed-over <team>.env replace these.
+# ENV OPENAI_BASE_URL=http://<your Brev instance>:8000/v1 \
+#     OPENAI_API_KEY=<your vLLM --api-key> \
+#     OPENAI_MODEL=<model>
+
 CMD ["python", "scripts/main.py"]

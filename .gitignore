@@ -1,2 +1,7 @@
 .venv
-**/*__pycache__
+**/__pycache__
+
+# Local settings and the organisers' credential files: never commit them
+.env
+*.env
+!.env.example

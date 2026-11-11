@@ -126,7 +126,8 @@ set -a; source <team>.vars.env; source <team>.secrets.env; set +a
 
 # Runtime limits
 
-Your pipeline is run under these limits during evaluation:
+Your image is run under these limits when we re-run it after code freeze
+([Code-freeze handover](#code-freeze-handover)):
 
 | Limit | Value |
 | --- | --- |
@@ -194,18 +195,83 @@ Docker container, `localhost` points at the container itself, not your laptop. U
 
 `brev port-forward` takes one port mapping per command. Run it once for each port you need.
 
-## LLM endpoint during evaluation
+The tunnel is for development only. When we run your image after code freeze there is no tunnel:
+see [Code-freeze handover](#code-freeze-handover).
 
-The eval passes your container an LLM endpoint as two environment variables:
+# Configuration
 
-- `LLM_BASE_URL`: an OpenAI-compatible base URL, for example a gateway you run, a hosted
-  OpenAI-compatible API, or vLLM on your eval box.
-- `LLM_API_KEY`: the key for that endpoint.
+Your agent's configuration lives in two places:
 
-Read both from the environment in your agent. Don't hardcode `localhost` or your own keys.
+- **Everything that defines your agent goes into the image**: model name, prompts, temperatures,
+  tool settings, in code, config files or `ENV` lines in the [Dockerfile](Dockerfile). It's frozen
+  with your commit, so the image we re-run after code freeze is the agent that produced your
+  submitted outputs.
+- **Read the LLM endpoint from `OPENAI_BASE_URL` and `OPENAI_API_KEY`.** The OpenAI Python SDK
+  picks both up by itself (`OpenAI()`), and most other clients take them as arguments:
 
-**You must keep your own endpoint up and reachable until judging ends.** If it goes down, your
-evaluation runs will fail.
+  ```python
+  import os
+  from openai import OpenAI
+
+  client = OpenAI()  # reads OPENAI_BASE_URL and OPENAI_API_KEY
+  model = os.environ.get("OPENAI_MODEL", "<your model>")
+  ```
+
+  Set your development values as `ENV` in the Dockerfile (there are commented lines to start
+  from), so the image you submit runs as it is. Other variables your agent reads, e.g. a second
+  endpoint, work the same way; just list them in your handover file below.
+
+A local `.env` is fine for development: copy [.env.example](.env.example). It's ignored by git
+and by `docker build`, so nothing in the image may depend on it. Whatever you put in the
+Dockerfile ends up in your image in our registry, which only your team and the organisers can
+pull: the key for your own vLLM endpoint is fine there, a personal provider key isn't.
+
+## Code-freeze handover
+
+After code freeze we re-run the top teams' images on our own machine, with your handed-over
+environment, as a non-root user, killed after 20 minutes:
+
+```sh
+docker run --env-file <team>.env -v <inputs>:/data/inputs:ro -v <outputs>:/data/outputs <your image> \
+    python scripts/main.py --input_dir /data/inputs --output_dir /data/outputs
+```
+
+1. **On the practice inputs**: the files it writes must match the outputs you submitted for that
+   commit. A mismatch doesn't change your score by itself, but we review it by hand.
+2. **On the hidden inputs**: these outputs decide the final ranking.
+
+So at code freeze, **send the organisers `<team>.env`**: every environment variable your agent
+reads, with the values for these runs. One `KEY=VALUE` per line, without quotes or `export`:
+
+```sh
+OPENAI_BASE_URL=http://<your Brev instance's public address>:8000/v1
+OPENAI_API_KEY=<the --api-key your vLLM serves with>
+OPENAI_MODEL=<model>      # and anything else your agent reads
+```
+
+It's passed to your container on top of the `ENV` in your image, so its values win. We may edit
+it to keep your runs working, e.g. if your instance's address changes, and we'll tell you if we
+do; tell us if anything changes after you've sent it. Your endpoint must:
+
+- **be reachable from the internet, without a tunnel.** `localhost` and `host.docker.internal`
+  only work on your laptop. Expose the port through Brev (see the
+  [Brev docs](https://docs.nvidia.com/brev/latest/)) and keep `--api-key` on.
+- **serve the same model, with the same settings, as when you made your submitted outputs**, and
+  stay up until judging ends. If it's down or has changed, your runs fail or stop matching.
+
+Check both before you hand over, from a machine that isn't tunnelled to your instance, by
+running your image exactly as we will:
+
+```sh
+curl -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models"   # with <team>.env loaded
+docker build --platform linux/amd64 -t my-agent .
+mkdir -p out && docker run --rm --user "$(id -u):$(id -g)" --env-file <team>.env \
+    -v "$PWD/artifacts/inputs:/data/inputs:ro" -v "$PWD/out:/data/outputs" \
+    my-agent python scripts/main.py --input_dir /data/inputs --output_dir /data/outputs
+```
+
+`out/` should then match your committed `artifacts/outputs/`. Write only to the output directory
+and `/tmp`: the container doesn't run as root.
 
 
 # Evaluation
