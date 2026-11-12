@@ -1,29 +1,66 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openai import BadRequestError, OpenAI
+from openai import APITimeoutError, BadRequestError, OpenAI
 
 from agentic_cad.cadquery_ref import extract_python_code
 from agentic_cad.config import HarnessConfig
 from agentic_cad.executor import execute_cadquery_script
 from agentic_cad.fallback import generate_fallback_step
-from agentic_cad.inspector import compare_against_facts, inspect_shape, load_step_shape
+from agentic_cad.inspector import FactsDiff, compare_against_facts, inspect_shape, load_step_shape
 from agentic_cad.prompts import (
     SYSTEM_PROMPT,
     build_initial_user_content,
     build_repair_messages,
 )
-from agentic_cad.renderer import build_visual_diff_composite, evaluate_views, tessellate_shape
+from agentic_cad.renderer import ViewEvalResult, build_visual_diff_composite, evaluate_views, tessellate_shape
 from agentic_cad.scorer import SurrogateScore, score_candidate
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_copy_file(src: Path, dst: Path) -> None:
+    """Copy `src` to `dst` via a same-directory temp file + os.replace to avoid torn reads/writes."""
+    tmp_dst = dst.parent / f".tmp_{dst.name}_{os.getpid()}_{threading.get_ident()}"
+    try:
+        shutil.copy2(src, tmp_dst)
+        os.replace(tmp_dst, dst)
+    finally:
+        if tmp_dst.exists():
+            tmp_dst.unlink(missing_ok=True)
+
+
+def _prefer_llm_over_floor(
+    best_score: SurrogateScore | None,
+    best_diff: FactsDiff | None,
+    best_ve: ViewEvalResult | None,
+    floor_score: SurrogateScore | None,
+    floor_diff: FactsDiff | None,
+) -> bool:
+    """Decide whether the best verified LLM solid should supersede the deterministic visual-hull floor."""
+    if best_score is None or not best_score.is_valid_single_solid:
+        return False
+    if floor_score is None or best_score.total >= floor_score.total:
+        return True
+    return (
+        best_diff is not None
+        and floor_diff is not None
+        and best_ve is not None
+        and best_diff.genus_diff == 0
+        and best_diff.max_bbox_err_pct <= 2.0
+        and best_ve.mean_silhouette_iou >= 0.80
+        and abs(best_diff.vol_err_pct) < 0.4 * abs(floor_diff.vol_err_pct)
+        and best_score.total >= floor_score.total - 0.05
+    )
 
 
 @dataclass
@@ -46,7 +83,7 @@ class QwenCadAgent:
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             timeout=self.config.llm_timeout_s,
-            max_retries=1,
+            max_retries=0,
         )
 
     def _plan_budget(self, facts: dict[str, Any] | None) -> tuple[str, int]:
@@ -55,8 +92,8 @@ class QwenCadAgent:
         if faces <= 30:
             return "medium", self.config.max_turns_simple
         if faces <= 200:
-            return "high", self.config.max_turns_medium
-        return "high", self.config.max_turns_complex
+            return "medium", self.config.max_turns_medium
+        return "xhigh", self.config.max_turns_complex
 
     def _call_llm(
         self,
@@ -65,10 +102,15 @@ class QwenCadAgent:
         timeout_s: float,
     ) -> str:
         t_mode = self.config.thinking_mode
+        max_tok = self.config.max_tokens
+        if len(messages) > 2:
+            max_tok = min(max_tok, 12288)
+        if reasoning_effort == "low":
+            max_tok = min(max_tok, 8192)
         kwargs: dict[str, Any] = {
             "model": self.config.openai_model,
             "messages": messages,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tok,
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
             "seed": self.config.seed,
@@ -83,8 +125,14 @@ class QwenCadAgent:
             try:
                 return self.client.chat.completions.create(**call_kwargs)
             except BadRequestError as exc:
-                err_s = str(exc)
-                if "reasoning_effort" in err_s and "reasoning_effort" in call_kwargs:
+                err_s = str(exc).lower()
+                if "reasoning" in err_s and "reasoning_effort" in call_kwargs:
+                    if call_kwargs["reasoning_effort"] != "medium" and "medium" in err_s:
+                        call_kwargs["reasoning_effort"] = "medium"
+                        try:
+                            return self.client.chat.completions.create(**call_kwargs)
+                        except BadRequestError:
+                            pass
                     call_kwargs.pop("reasoning_effort", None)
                     return self.client.chat.completions.create(**call_kwargs)
                 if "chat_template_kwargs" in err_s and "extra_body" in call_kwargs:
@@ -106,6 +154,8 @@ class QwenCadAgent:
         if t_mode == "auto" and (not content or (finish_reason == "length" and "```" not in content)):
             retry_kwargs = dict(kwargs)
             retry_kwargs.pop("reasoning_effort", None)
+            retry_kwargs["max_tokens"] = min(int(retry_kwargs["max_tokens"]), 8192)
+            retry_kwargs["timeout"] = min(90.0, timeout_s)
             retry_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             try:
                 resp2 = _invoke(retry_kwargs)
@@ -203,7 +253,7 @@ class QwenCadAgent:
             floor_diff: Any = None
             try:
                 if generate_fallback_step(views, facts, floor_step):
-                    shutil.copy2(floor_step, output_path)
+                    _atomic_copy_file(floor_step, output_path)
                     _, floor_diff, floor_ve, floor_score = self._evaluate_step(floor_step, facts, views)
                     logger.info(
                         "[%s] Floor hull ready (score=%.3f, iou=%.3f)",
@@ -219,11 +269,10 @@ class QwenCadAgent:
                     floor_step = None
 
             for turn in range(max_turns):
-                if global_deadline is not None:
-                    remaining = global_deadline - time.monotonic()
-                    if remaining < 12.0:
-                        logger.warning("[%s] Global budget nearly exhausted (%.1fs left); finalizing.", name, remaining)
-                        break
+                remaining = (global_deadline - time.monotonic()) if global_deadline is not None else None
+                if remaining is not None and remaining < 12.0:
+                    logger.warning("[%s] Global budget nearly exhausted (%.1fs left); finalizing.", name, remaining)
+                    break
 
                 turns_used = turn + 1
                 if turn == 0:
@@ -239,12 +288,40 @@ class QwenCadAgent:
                         diff_composite_png=last_diff_png,
                     )
 
+                turn_effort = effort if turn == 0 else ("medium" if effort == "xhigh" else effort)
+                if remaining is not None:
+                    if remaining < 160.0:
+                        turn_effort = "low"
+                    elif remaining < 280.0 and turn_effort == "xhigh":
+                        turn_effort = "medium"
+
                 call_timeout = self.config.llm_timeout_s
-                if global_deadline is not None:
-                    call_timeout = min(call_timeout, max(15.0, global_deadline - time.monotonic() - 10.0))
+                if remaining is not None:
+                    call_timeout = min(call_timeout, max(15.0, remaining - 10.0))
 
                 try:
-                    raw_reply = self._call_llm(messages, reasoning_effort=effort, timeout_s=call_timeout)
+                    raw_reply = self._call_llm(messages, reasoning_effort=turn_effort, timeout_s=call_timeout)
+                except (APITimeoutError, TimeoutError) as exc:
+                    rem_after = (global_deadline - time.monotonic()) if global_deadline is not None else 120.0
+                    if turn_effort != "low" and self.config.thinking_mode != "off" and rem_after >= 35.0:
+                        logger.warning(
+                            "[%s] turn %d timed out (%s); retrying fast low-reasoning pass.",
+                            name,
+                            turn,
+                            exc,
+                        )
+                        try:
+                            raw_reply = self._call_llm(
+                                messages,
+                                reasoning_effort="low",
+                                timeout_s=min(90.0, rem_after - 10.0),
+                            )
+                        except Exception as exc2:
+                            logger.warning("[%s] LLM fast retry failed on turn %d: %s", name, turn, exc2)
+                            break
+                    else:
+                        logger.warning("[%s] LLM call timed out on turn %d: %s", name, turn, exc)
+                        break
                 except Exception as exc:
                     logger.warning("[%s] LLM call failed on turn %d: %s", name, turn, exc)
                     break
@@ -326,6 +403,8 @@ class QwenCadAgent:
                     last_code = code
                     last_diag = diag_report
                     last_diff_png = diff_png
+                    if _prefer_llm_over_floor(best_score, best_diff, best_ve, floor_score, floor_diff):
+                        _atomic_copy_file(best_step_tmp, output_path)
                 else:
                     # Revert base code in prompt back to best candidate so repair doesn't spiral
                     last_code = best_code or code
@@ -342,27 +421,13 @@ class QwenCadAgent:
                     break
 
             # Select best verified candidate between LLM solid and deterministic visual-hull floor
-            choose_llm = False
-            if best_step_tmp is not None and best_score is not None and best_score.is_valid_single_solid:
-                if floor_score is None or best_score.total >= floor_score.total:
-                    choose_llm = True
-                elif (
-                    best_diff is not None
-                    and floor_diff is not None
-                    and best_ve is not None
-                    and best_diff.genus_diff == 0
-                    and best_diff.max_bbox_err_pct <= 2.0
-                    and best_ve.mean_silhouette_iou >= 0.80
-                    and abs(best_diff.vol_err_pct) < 0.4 * abs(floor_diff.vol_err_pct)
-                    and best_score.total >= floor_score.total - 0.05
-                ):
-                    choose_llm = True
+            choose_llm = _prefer_llm_over_floor(best_score, best_diff, best_ve, floor_score, floor_diff)
 
             if choose_llm and best_step_tmp is not None and best_step_tmp.is_file():
-                shutil.copy2(best_step_tmp, output_path)
+                _atomic_copy_file(best_step_tmp, output_path)
                 final_score = best_score
             elif floor_step is not None and floor_step.is_file():
-                shutil.copy2(floor_step, output_path)
+                _atomic_copy_file(floor_step, output_path)
                 final_score = floor_score
                 used_fallback = True
             else:

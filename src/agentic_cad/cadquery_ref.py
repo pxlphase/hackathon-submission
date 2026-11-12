@@ -16,6 +16,9 @@ CADQUERY_CHEATSHEET = """## Authoritative CadQuery 2.8 Reference (Strict BRep Ru
 
 2. **Verified Method Signatures & Common Traps**:
    - Prefer `.circle(r).extrude(h)` or `cq.Solid.makeCylinder(radius, height, pnt, dir)` over `Workplane.cylinder(height, radius)` (note `height` is FIRST in `Workplane.cylinder`!).
+   - **`Workplane.union(...)` vs `Solid.fuse(...)`**: `cq.Workplane` uses `.union(other)` / `.cut(other)`. Raw `cq.Solid` or `cq.Shape` objects (`cq.Solid.makeBox`, `.makeCylinder`, `.val()`) do **NOT** have `.union()` — use **`.fuse(other)`** (or wrap in `cq.Workplane("XY").newObject([solid])`).
+   - **`lineTo(x, y)`, `moveTo(x, y)`, `line(dx, dy)` take TWO separate floats (`lineTo(10, 20)`), NEVER a tuple `lineTo((10, 20))`!** Use `.line(dx, dy)` (not `.rLineTo()`) for relative lines; only `.polyline([(x1, y1), ...])` takes a list of tuples.
+   - **`translate((dx, dy, dz))` & `rotate((0,0,0), (0,0,1), deg)`**: `.translate(...)` takes ONE 3-tuple (never 3 args); use `.rotate(p1, p2, deg)` or `.transformed(rotate=(rx, ry, rz), offset=(ox, oy, oz))` (there is NO `.rotateX/Y/Z()`).
    - **`cutBlind` direction**: `.faces(">Z").workplane(centerOption="CenterOfBoundBox")` has outward normal `+Z` -> pass **negative depth** `.cutBlind(-d)` (or `workplane(invert=True)` + `.cutBlind(d)`). Positive `.cutBlind(+d)` on an outward face cuts into empty air!
    - **Holes** (already invert inward automatically on selected planar faces):
      - `.hole(diameter, depth=None)` — omit `depth` (or pass `None`) for a through-hole. NEVER pass `through=True`.
@@ -67,6 +70,11 @@ _HALLUCINATED_METHODS = {
     "cutThroughAll": "Use `.cutThruAll()` instead of `.cutThroughAll()`.",
     "fillet_all": "CadQuery has no `.fillet_all()`; select edges via `.edges(...)` and call `.fillet(r)`.",
     "chamfer_all": "CadQuery has no `.chamfer_all()`; select edges via `.edges(...)` and call `.chamfer(d)`.",
+    "rLineTo": "CadQuery has no `.rLineTo()`; use `.line(dx, dy)` for relative segments or `.lineTo(x, y)` for absolute coordinates.",
+    "rLine": "CadQuery has no `.rLine()`; use `.line(dx, dy)` for relative segments.",
+    "rotateX": "CadQuery has no `.rotateX()`; use `.rotate((0, 0, 0), (1, 0, 0), angle_deg)` or `.transformed(rotate=(rx, ry, rz))`.",
+    "rotateY": "CadQuery has no `.rotateY()`; use `.rotate((0, 0, 0), (0, 1, 0), angle_deg)` or `.transformed(rotate=(rx, ry, rz))`.",
+    "rotateZ": "CadQuery has no `.rotateZ()`; use `.rotate((0, 0, 0), (0, 0, 1), angle_deg)` or `.transformed(rotate=(rx, ry, rz))`.",
 }
 
 _HALLUCINATED_CQ_ATTRS = {
@@ -143,6 +151,15 @@ def validate_cadquery_ast(code: str) -> list[str]:
                             )
                         elif kw.arg == "diam":
                             errors.append(f"`.{attr}()` uses `diameter=...`, not `diam=...`.")
+                if attr in {"lineTo", "moveTo", "line", "center"}:
+                    if len(node.args) == 1 and isinstance(node.args[0], ast.Tuple) and not node.keywords:
+                        errors.append(
+                            f"`.{attr}(x, y)` expects two separate float arguments, not a tuple `.{attr}((x, y))`."
+                        )
+                if attr == "translate" and len(node.args) == 3 and not node.keywords:
+                    errors.append(
+                        "`.translate((dx, dy, dz))` expects ONE 3-tuple or `cq.Vector`, not 3 separate arguments."
+                    )
                 if (
                     isinstance(node.func.value, ast.Name)
                     and node.func.value.id == "cq"

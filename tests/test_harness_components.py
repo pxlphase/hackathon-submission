@@ -136,6 +136,10 @@ result = cq.Workplane("XY").box(20, 10, 5, centered=(False, False, False))
     assert any("cutThroughAll" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(5,5,5).faces('>Z').circle(1).cutThroughAll()"))
     assert any("through" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(5,5,5).faces('>Z').hole(2, through=True)"))
     assert any("Cylinder" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Cylinder(2, 5)"))
+    assert any("separate float arguments" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').moveTo((0, 0)).lineTo((10, 0)).close().extrude(5)"))
+    assert any(".rLineTo()" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').moveTo(0, 0).rLineTo(10, 0).close().extrude(5)"))
+    assert any(".rotateZ()" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(1, 2, 3).rotateZ(45)"))
+    assert any("ONE 3-tuple" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(1, 2, 3).translate(1, 2, 3)"))
     assert any("Missing assignment to `result`" in e for e in validate_cadquery_ast("import cadquery as cq\npart = cq.Workplane('XY').box(1, 1, 1)"))
 
 
@@ -150,6 +154,16 @@ result = cq.Workplane("XY").box(30, 20, 10, centered=(False, False, False))
     tel = inspect_step_file(tmp_path / "ok.stp")
     assert tel.is_valid and tel.solids == 1
     assert tel.bounding_box_mm == {"x": 30.0, "y": 20.0, "z": 10.0}
+
+    solid_union_code = """
+import cadquery as cq
+a = cq.Solid.makeBox(10, 10, 10)
+b = cq.Solid.makeBox(10, 10, 10, cq.Vector(5, 0, 0))
+result = a.union(b)
+"""
+    res_su = execute_cadquery_script(solid_union_code, tmp_path / "su.stp")
+    assert not res_su.ok
+    assert ".fuse(other)" in res_su.error
 
     multi_code = """
 import cadquery as cq
@@ -467,6 +481,80 @@ result = cq.Workplane("XY").box(5.0, 5.0, 5.0, centered=(False, False, False))
     assert not s5.used_fallback
     assert len(t_client.calls) == 2
     assert t_client.calls[1].get("extra_body", {}).get("chat_template_kwargs", {}).get("enable_thinking") is False
+
+    # 6. Exact vLLM 400 BadRequestError ("Unexpected reasoning effort ...") recovery + valid budget values
+    from openai import BadRequestError
+
+    class _FakeBadRequest(BadRequestError):
+        def __init__(self, msg: str):
+            Exception.__init__(self, msg)
+
+    class _EffortRejectClient:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("reasoning_effort") == "high":
+                raise _FakeBadRequest(
+                    "Error code: 400 - Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low."
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=good_script, reasoning_content=None),
+                    )
+                ]
+            )
+
+    e_client = _EffortRejectClient()
+    agent6 = QwenCadAgent(config=cfg, client=e_client)
+    assert agent6._plan_budget({"faces": 150})[0] == "medium"
+    assert agent6._plan_budget({"faces": 350})[0] == "xhigh"
+    reply6 = agent6._call_llm([{"role": "user", "content": "hi"}], reasoning_effort="high", timeout_s=30.0)
+    assert "box(40.0, 30.0, 10.0" in reply6
+    assert e_client.calls[1].get("reasoning_effort") == "medium"
+
+    # 7. Timeout rescue on Turn 0 -> retries fast low-reasoning pass + repair turns cap xhigh down to medium
+    from openai import APITimeoutError
+
+    class _FakeTimeout(APITimeoutError):
+        def __init__(self, msg: str):
+            Exception.__init__(self, msg)
+
+    class _TimeoutThenRepairClient:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise _FakeTimeout("Request timed out.")
+            reply_txt = no_hole_script if len(self.calls) == 2 else good_script
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=reply_txt, reasoning_content=None),
+                    )
+                ]
+            )
+
+    to_client = _TimeoutThenRepairClient()
+    complex_facts = dict(facts, faces=350)
+    agent7 = QwenCadAgent(config=cfg, client=to_client)
+    out7 = tmp_path / "timeout_rescue.stp"
+    s7 = agent7.generate_cad("Complex plate", views, None, out7, facts=complex_facts, case_name="case_to")
+    assert not s7.used_fallback
+    assert s7.turns_used == 2
+    assert to_client.calls[0].get("reasoning_effort") == "xhigh"
+    assert to_client.calls[1].get("reasoning_effort") == "low"
+    assert to_client.calls[2].get("reasoning_effort") == "medium"
+    assert inspect_step_file(out7).through_holes_genus == 1
+    assert not list(tmp_path.glob(".tmp_*"))
 
 
 def test_submission_solid_check_rejects_mock_text(tmp_path):

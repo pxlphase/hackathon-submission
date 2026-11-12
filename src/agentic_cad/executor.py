@@ -206,4 +206,9 @@ def execute_cadquery_script(
                     used_fillet_fallback=True,
                 )
 
+    if "object has no attribute 'union'" in err and any(k in err for k in ("'Solid'", "'Compound'", "'Shape'")):
+        err += "\nHint: cq.Solid/cq.Shape objects do not have .union(); use .fuse(other) or wrap in cq.Workplane('XY').newObject([solid])."
+    elif "object has no attribute 'faces'" in err and any(k in err for k in ("'Solid'", "'Compound'", "'Shape'")):
+        err += "\nHint: cq.Solid/cq.Shape objects do not have .faces(); wrap in cq.Workplane('XY').newObject([solid]) before selecting faces."
+
     return ExecutionResult(ok=False, step_path=None, error=err, traceback_text=tb)

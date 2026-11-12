@@ -37,7 +37,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Non-secret agent runtime defaults (README: Configuration).
 # Endpoint credentials are injected via <team>.env at code freeze, or set here for dev builds.
-ENV CAD_GLOBAL_TIMEOUT_S=3300 \
+ENV CAD_GLOBAL_TIMEOUT_S=1140 \
+    CAD_LLM_TIMEOUT_S=240 \
     CAD_MAX_WORKERS=4 \
     CAD_IOU_EARLY_EXIT=0.95 \
     CAD_THINKING=auto
