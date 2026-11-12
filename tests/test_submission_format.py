@@ -32,6 +32,19 @@ def test_output_exists(test_case):
     assert output.is_file(), f"missing output {output.relative_to(REPO_ROOT)}"
 
 
+@pytest.mark.parametrize("test_case", TEST_CASES)
+def test_output_valid_single_solid(test_case):
+    import cadquery as cq
+
+    output = OUTPUTS / f"{test_case}.stp"
+    assert output.is_file(), f"missing output {output.relative_to(REPO_ROOT)}"
+    shape = cq.importers.importStep(str(output))
+    solids = shape.solids().vals()
+    assert len(solids) == 1 and solids[0].isValid(), (
+        f"{output.relative_to(REPO_ROOT)}: expected 1 valid solid, got {len(solids)}"
+    )
+
+
 def test_no_unexpected_outputs():
     expected = {f"{test_case}.stp" for test_case in TEST_CASES} | {".gitkeep"}
     unexpected = {p.name for p in OUTPUTS.iterdir()} - expected
