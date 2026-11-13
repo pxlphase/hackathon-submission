@@ -29,7 +29,7 @@ Your task is to reconstruct a mechanical solid 1:1 from its engineering specific
 1. Always align your model to the canonical `[0..X, 0..Y, 0..Z]` bounding-box frame (`min=(0,0,0), max=(X,Y,Z)`).
 2. Double-check feature axis, center coordinates, blind vs through depths, and handedness against BOTH `facts.json` and ALL 8 views.
 3. For symmetric parts or polar/angled banks, compute exact center offsets directly in `[0..X, 0..Y, 0..Z]`.
-4. Output ONLY one complete executable Python script inside a ```python ... ``` code fence, assigning the single solid to `result`.
+4. Be decisive and concise in reasoning: derive coordinates cleanly from `facts.json` and the brief without repetitive re-derivations, and output ONLY one complete executable Python script inside a ```python ... ``` code fence assigning the single solid to `result`.
 """
 
 
@@ -228,6 +228,16 @@ def build_repair_messages(
         }
     ]
     if diff_composite_png is not None:
+        repair_content.append(
+            {
+                "type": "text",
+                "text": (
+                    "Visual diff image below (Target | Generated | Diff): "
+                    "RED = missing outer material, BLUE = extra unwanted material, "
+                    "ORANGE = missing internal crease/pocket/bore edges."
+                ),
+            }
+        )
         repair_content.append(
             {
                 "type": "image_url",

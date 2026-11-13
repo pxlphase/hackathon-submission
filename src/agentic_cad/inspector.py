@@ -85,6 +85,7 @@ class FactsDiff:
     missing_hole_groups: list[str]
     extra_hole_count: int
     missing_face_types: dict[str, int]
+    missing_boss_groups: list[str] = field(default_factory=list)
 
     def summary_lines(self, telemetry: CadTelemetry, facts: dict[str, Any]) -> list[str]:
         lines: list[str] = []
@@ -121,6 +122,10 @@ class FactsDiff:
         if self.missing_hole_groups:
             lines.append("- Missing/mismatched cylindrical holes vs facts.json:")
             for msg in self.missing_hole_groups[:8]:
+                lines.append(f"  * {msg}")
+        if self.missing_boss_groups:
+            lines.append("- Missing/mismatched cylindrical shafts/bosses vs facts.json:")
+            for msg in self.missing_boss_groups[:8]:
                 lines.append(f"  * {msg}")
         if self.missing_face_types:
             ft_str = ", ".join(f"{k}: need {v}" for k, v in self.missing_face_types.items())
@@ -339,6 +344,122 @@ def _parse_axis(axis_val: Any) -> tuple[float, float, float] | None:
     return None
 
 
+def _perp_and_3d_dist(
+    centre_a: tuple[float, float, float],
+    centre_b: tuple[float, float, float],
+    axis: tuple[float, float, float],
+) -> tuple[float, float]:
+    dx = centre_a[0] - centre_b[0]
+    dy = centre_a[1] - centre_b[1]
+    dz = centre_a[2] - centre_b[2]
+    dist3d = math.sqrt(dx * dx + dy * dy + dz * dz)
+    proj = dx * axis[0] + dy * axis[1] + dz * axis[2]
+    px = dx - proj * axis[0]
+    py = dy - proj * axis[1]
+    pz = dz - proj * axis[2]
+    perp = math.sqrt(px * px + py * py + pz * pz)
+    return perp, dist3d
+
+
+def _match_cylinder_groups(
+    candidates: list[CylinderFeature],
+    groups: list[dict[str, Any]],
+) -> tuple[list[str], set[int]]:
+    missing_msgs: list[str] = []
+    matched_cand_indices: set[int] = set()
+
+    for grp in groups:
+        tdia = float(grp.get("diameter", 0.0))
+        tcnt = int(grp.get("count", 0))
+        if tcnt <= 0:
+            continue
+        taxis = _parse_axis(grp.get("axis"))
+        eligible = [
+            idx
+            for idx, ch in enumerate(candidates)
+            if idx not in matched_cand_indices
+            and abs(ch.diameter - tdia) <= max(0.3, 0.03 * tdia)
+            and (taxis is None or abs(sum(a * b for a, b in zip(ch.axis, taxis))) >= 0.96)
+        ]
+
+        raw_centres = grp.get("centres", [])
+        t_centres = [
+            (float(c[0]), float(c[1]), float(c[2]))
+            for c in raw_centres
+            if isinstance(c, (list, tuple)) and len(c) == 3
+        ]
+
+        if not t_centres:
+            found = min(tcnt, len(eligible))
+            for idx in eligible[:found]:
+                matched_cand_indices.add(idx)
+            if found < tcnt:
+                missing_msgs.append(
+                    f"Expected {tcnt}x dia={tdia}mm along axis={grp.get('axis')} (found {found})"
+                )
+            continue
+
+        pos_tol = max(2.0, 0.05 * tdia)
+        pairs: list[tuple[float, float, int, int]] = []
+        for c_idx in eligible:
+            ch = candidates[c_idx]
+            ref_axis = taxis or ch.axis
+            for tc_idx, tc in enumerate(t_centres):
+                perp_dist, dist3d = _perp_and_3d_dist(ch.centre, tc, ref_axis)
+                pairs.append((perp_dist, dist3d, c_idx, tc_idx))
+        pairs.sort()
+
+        used_c: set[int] = set()
+        used_tc: set[int] = set()
+        for perp_dist, _dist3d, c_idx, tc_idx in pairs:
+            if perp_dist > pos_tol:
+                break
+            if c_idx in used_c or tc_idx in used_tc:
+                continue
+            used_c.add(c_idx)
+            used_tc.add(tc_idx)
+            matched_cand_indices.add(c_idx)
+
+        matched_listed = len(used_tc)
+        unlisted_needed = max(0, tcnt - len(t_centres))
+        remaining_eligible = [idx for idx in eligible if idx not in used_c]
+        unlisted_matched = min(unlisted_needed, len(remaining_eligible))
+        for idx in remaining_eligible[:unlisted_matched]:
+            matched_cand_indices.add(idx)
+            used_c.add(idx)
+
+        found = matched_listed + unlisted_matched
+        if matched_listed < min(tcnt, len(t_centres)) or found < tcnt:
+            unmatched_details: list[str] = []
+            for tc_idx, tc in enumerate(t_centres):
+                if tc_idx in used_tc:
+                    continue
+                if eligible:
+                    best_perp = min(
+                        _perp_and_3d_dist(candidates[c_idx].centre, tc, taxis or candidates[c_idx].axis)[0]
+                        for c_idx in eligible
+                    )
+                    unmatched_details.append(
+                        f"{[round(tc[0], 1), round(tc[1], 1), round(tc[2], 1)]} (nearest radial_offset={best_perp:.1f}mm)"
+                    )
+                else:
+                    unmatched_details.append(str([round(tc[0], 1), round(tc[1], 1), round(tc[2], 1)]))
+                if len(unmatched_details) >= 3:
+                    break
+            if unmatched_details:
+                missing_msgs.append(
+                    f"Expected {tcnt}x dia={tdia}mm along axis={grp.get('axis')} (matched {found}/{tcnt}); "
+                    f"missing/shifted centres={', '.join(unmatched_details)}"
+                )
+            else:
+                missing_msgs.append(
+                    f"Expected {tcnt}x dia={tdia}mm along axis={grp.get('axis')} (found {found}); "
+                    f"sample centres={raw_centres[:3]}"
+                )
+
+    return missing_msgs, matched_cand_indices
+
+
 def compare_against_facts(telemetry: CadTelemetry, facts: dict[str, Any] | None) -> FactsDiff:
     """Compute signed percentage & structural errors relative to facts.json."""
     if not facts:
@@ -353,6 +474,7 @@ def compare_against_facts(telemetry: CadTelemetry, facts: dict[str, Any] | None)
             missing_hole_groups=[],
             extra_hole_count=0,
             missing_face_types={},
+            missing_boss_groups=[],
         )
 
     t_box = facts.get("bounding_box_mm", {})
@@ -381,31 +503,16 @@ def compare_against_facts(telemetry: CadTelemetry, facts: dict[str, Any] | None)
     t_genus = facts.get("through_holes_genus")
     genus_diff = (telemetry.through_holes_genus - int(t_genus)) if t_genus is not None else 0
 
-    # Match cylindrical hole groups against extracted concave holes
-    missing_hole_groups: list[str] = []
-    matched_cand_indices: set[int] = set()
-    for grp in facts.get("cylindrical_holes_and_bores", []):
-        tdia = float(grp.get("diameter", 0.0))
-        tcnt = int(grp.get("count", 0))
-        taxis = _parse_axis(grp.get("axis"))
-        found = 0
-        for idx, ch in enumerate(telemetry.holes):
-            if idx in matched_cand_indices:
-                continue
-            if abs(ch.diameter - tdia) <= max(0.3, 0.03 * tdia):
-                if taxis is None or abs(sum(a * b for a, b in zip(ch.axis, taxis))) >= 0.96:
-                    matched_cand_indices.add(idx)
-                    found += 1
-                    if found == tcnt:
-                        break
-        if found < tcnt:
-            centres_preview = grp.get("centres", [])[:3]
-            missing_hole_groups.append(
-                f"Expected {tcnt}x dia={tdia}mm along axis={grp.get('axis')} (found {found}); "
-                f"sample centres={centres_preview}"
-            )
+    missing_hole_groups, matched_hole_indices = _match_cylinder_groups(
+        telemetry.holes,
+        facts.get("cylindrical_holes_and_bores", []),
+    )
+    extra_holes = max(0, len(telemetry.holes) - len(matched_hole_indices))
 
-    extra_holes = max(0, len(telemetry.holes) - len(matched_cand_indices))
+    missing_boss_groups, _ = _match_cylinder_groups(
+        telemetry.bosses,
+        facts.get("cylindrical_shafts_and_bosses", []),
+    )
 
     missing_face_types: dict[str, int] = {}
     t_ft = facts.get("face_types", {})
@@ -424,4 +531,5 @@ def compare_against_facts(telemetry: CadTelemetry, facts: dict[str, Any] | None)
         missing_hole_groups=missing_hole_groups,
         extra_hole_count=extra_holes,
         missing_face_types=missing_face_types,
+        missing_boss_groups=missing_boss_groups,
     )

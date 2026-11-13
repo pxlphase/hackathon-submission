@@ -53,7 +53,7 @@ class HarnessConfig:
     openai_base_url: str
     openai_api_key: str
     openai_model: str
-    max_workers: int = 4
+    max_workers: int = 3
     global_timeout_s: float = 3300.0
     exec_timeout_s: float = 45.0
     llm_timeout_s: float = 300.0
@@ -91,7 +91,7 @@ class HarnessConfig:
             openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip() or "EMPTY",
             openai_model=os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.8-27B").strip()
             or "Qwen/Qwen3.8-27B",
-            max_workers=max(1, _env_int("CAD_MAX_WORKERS", 4)),
+            max_workers=max(1, _env_int("CAD_MAX_WORKERS", 3)),
             global_timeout_s=max(60.0, _env_float("CAD_GLOBAL_TIMEOUT_S", 3300.0)),
             exec_timeout_s=max(10.0, _env_float("CAD_EXEC_TIMEOUT_S", 45.0)),
             llm_timeout_s=max(30.0, _env_float("CAD_LLM_TIMEOUT_S", 300.0)),

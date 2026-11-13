@@ -66,9 +66,20 @@ try:
         sys.exit(4)
 
     if n_solids != 1 or export_obj is None:
+        details = []
+        for idx, sol in enumerate(sorted(solids, key=lambda s: s.Volume(), reverse=True)[:6]):
+            bb = sol.BoundingBox()
+            details.append(
+                f"Solid #{idx}: vol={sol.Volume():.1f}, "
+                f"X[{bb.xmin:.1f}..{bb.xmax:.1f}] Y[{bb.ymin:.1f}..{bb.ymax:.1f}] Z[{bb.zmin:.1f}..{bb.zmax:.1f}]"
+            )
+        detail_msg = ("\n" + "\n".join(details)) if details else ""
         meta_out.write_text(json.dumps({
             "ok": False,
-            "error": f"Expected exactly 1 Solid, produced {n_solids} solids.",
+            "error": (
+                f"Expected exactly 1 Solid, produced {n_solids} solids.{detail_msg}\n"
+                "Check overlaps / fuse disconnected ribs or tabs into one connected solid."
+            ),
             "traceback": "",
         }))
         sys.exit(5)
@@ -206,9 +217,12 @@ def execute_cadquery_script(
                     used_fillet_fallback=True,
                 )
 
-    if "object has no attribute 'union'" in err and any(k in err for k in ("'Solid'", "'Compound'", "'Shape'")):
-        err += "\nHint: cq.Solid/cq.Shape objects do not have .union(); use .fuse(other) or wrap in cq.Workplane('XY').newObject([solid])."
-    elif "object has no attribute 'faces'" in err and any(k in err for k in ("'Solid'", "'Compound'", "'Shape'")):
-        err += "\nHint: cq.Solid/cq.Shape objects do not have .faces(); wrap in cq.Workplane('XY').newObject([solid]) before selecting faces."
+    if any(k in err for k in ("'Solid'", "'Compound'", "'Shape'")) and "object has no attribute" in err:
+        if "attribute 'union'" in err:
+            err += "\nHint: cq.Solid/cq.Shape objects do not have .union(); use .fuse(other) or wrap in cq.Workplane('XY').newObject([solid])."
+        elif "attribute 'vals'" in err or "attribute 'val'" in err:
+            err += "\nHint: cq.Solid/cq.Shape objects use .Solids() (not .vals()/.val()); keep working on cq.Workplane until export."
+        elif any(f"attribute '{m}'" in err for m in ("faces", "edges", "hole", "cboreHole", "cskHole", "cutBlind", "cutThruAll", "workplane")):
+            err += "\nHint: wrap raw cq.Solid/cq.Shape in cq.Workplane('XY').newObject([solid]) before selecting faces or cutting Workplane features."
 
     return ExecutionResult(ok=False, step_path=None, error=err, traceback_text=tb)

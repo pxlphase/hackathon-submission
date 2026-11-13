@@ -463,29 +463,32 @@ def build_visual_diff_composite(
         if rv is None:
             continue
 
-        # Target image tightly framed to match rendered orientation
-        tgt_im = Image.open(metric.target_path).convert("RGB").resize((tile_px, tile_px), Image.Resampling.LANCZOS)
+        tgt_raw_im = Image.open(metric.target_path).convert("RGB")
+        tgt_raw_arr = np.asarray(tgt_raw_im)
+        tgt_im = tgt_raw_im.resize((tile_px, tile_px), Image.Resampling.LANCZOS)
         gen_im = rv.image.resize((tile_px, tile_px), Image.Resampling.LANCZOS)
 
-        # Normalized red/blue pixel difference overlay
-        tgt_mask_raw = np.any(np.asarray(tgt_im) < 245, axis=-1)
-        gen_mask_raw = np.any(np.asarray(gen_im) < 245, axis=-1)
-        t_norm, _, _ = _normalize_mask_box(tgt_mask_raw, tgt_mask_raw, tile_px)
-        g_norm, _, _ = _normalize_mask_box(gen_mask_raw, gen_mask_raw, tile_px)
+        # Normalized red/blue silhouette + orange missing-internal-edge difference overlay
+        tgt_mask_raw = _erode_1px(np.any(tgt_raw_arr < 245, axis=-1))
+        tgt_edge_raw = np.max(tgt_raw_arr, axis=-1) < 115
+        t_norm, t_edge_norm, _ = _normalize_mask_box(tgt_mask_raw, tgt_edge_raw, tile_px)
+        g_norm, g_edge_norm, _ = _normalize_mask_box(rv.mask, rv.edge_mask, tile_px)
 
         diff_arr = np.full((tile_px, tile_px, 3), 255, dtype=np.uint8)
         both = t_norm & g_norm
         missing = t_norm & ~g_norm
         extra = g_norm & ~t_norm
+        missing_internal_edges = both & t_edge_norm & ~_dilate_bool(g_edge_norm, 2)
         diff_arr[both] = [145, 130, 155]  # Neutral gray-purple overlap
-        diff_arr[missing] = [225, 45, 45]  # Red = target missing in generated
+        diff_arr[missing_internal_edges] = [255, 165, 0]  # Orange = missing internal pocket/bore/crease edge
+        diff_arr[missing] = [225, 45, 45]  # Red = target silhouette missing
         diff_arr[extra] = [40, 105, 235]  # Blue = extra unwanted material
         diff_im = Image.fromarray(diff_arr, mode="RGB")
 
         labels = [
             f"TARGET: {metric.name}",
             f"GENERATED (IoU={metric.silhouette_iou:.2f}, Edge={metric.edge_f1:.2f})",
-            "DIFF (RED=Missing, BLUE=Extra)",
+            "DIFF (RED=Miss, BLUE=Extra, ORANGE=MissEdge)",
         ]
         for c_idx, (lbl, tile) in enumerate(zip(labels, (tgt_im, gen_im, diff_im))):
             x0 = c_idx * tile_px

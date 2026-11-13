@@ -93,7 +93,7 @@ class QwenCadAgent:
             return "medium", self.config.max_turns_simple
         if faces <= 200:
             return "medium", self.config.max_turns_medium
-        return "xhigh", self.config.max_turns_complex
+        return "medium", self.config.max_turns_complex
 
     def _call_llm(
         self,
@@ -105,7 +105,7 @@ class QwenCadAgent:
         max_tok = self.config.max_tokens
         if len(messages) > 2:
             max_tok = min(max_tok, 12288)
-        if reasoning_effort == "low":
+        if reasoning_effort in ("low", "none"):
             max_tok = min(max_tok, 8192)
         kwargs: dict[str, Any] = {
             "model": self.config.openai_model,
@@ -116,7 +116,7 @@ class QwenCadAgent:
             "seed": self.config.seed,
             "timeout": timeout_s,
         }
-        if t_mode == "off":
+        if t_mode == "off" or reasoning_effort == "none":
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
         else:
             kwargs["reasoning_effort"] = reasoning_effort
@@ -151,11 +151,15 @@ class QwenCadAgent:
 
         # Guard against thinking-budget starvation returning empty/cutoff reply: retry once with thinking disabled
         finish_reason = getattr(choice, "finish_reason", None)
-        if t_mode == "auto" and (not content or (finish_reason == "length" and "```" not in content)):
+        if (
+            t_mode == "auto"
+            and reasoning_effort != "none"
+            and (not content or (finish_reason == "length" and "```" not in content))
+        ):
             retry_kwargs = dict(kwargs)
             retry_kwargs.pop("reasoning_effort", None)
             retry_kwargs["max_tokens"] = min(int(retry_kwargs["max_tokens"]), 8192)
-            retry_kwargs["timeout"] = min(90.0, timeout_s)
+            retry_kwargs["timeout"] = min(150.0, timeout_s)
             retry_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             try:
                 resp2 = _invoke(retry_kwargs)
@@ -195,8 +199,10 @@ class QwenCadAgent:
             return False
         if view_eval.mean_silhouette_iou < self.config.iou_early_exit:
             return False
+        if view_eval.min_silhouette_iou < min(0.88, self.config.iou_early_exit):
+            return False
         if not facts:
-            return view_eval.mean_silhouette_iou >= self.config.iou_early_exit
+            return True
         return (
             diff.max_bbox_err_pct <= self.config.bbox_tol_pct
             and abs(diff.vol_err_pct) <= self.config.vol_tol_pct
@@ -243,6 +249,9 @@ class QwenCadAgent:
         last_diff_png: bytes | None = None
         turns_used = 0
         used_fallback = False
+        prev_exec_failed = False
+        stagnant_streak = 0
+        no_improve_streak = 0
 
         with tempfile.TemporaryDirectory(prefix=f"cad_work_{name}_") as work_str:
             work_dir = Path(work_str)
@@ -288,12 +297,18 @@ class QwenCadAgent:
                         diff_composite_png=last_diff_png,
                     )
 
-                turn_effort = effort if turn == 0 else ("medium" if effort == "xhigh" else effort)
+                if turn == 0:
+                    turn_effort = effort
+                elif turn >= 2 and not prev_exec_failed:
+                    turn_effort = "low"
+                else:
+                    turn_effort = "medium" if effort == "xhigh" else effort
+
                 if remaining is not None:
-                    if remaining < 160.0:
+                    if remaining < 60.0:
+                        turn_effort = "none"
+                    elif remaining < 180.0:
                         turn_effort = "low"
-                    elif remaining < 280.0 and turn_effort == "xhigh":
-                        turn_effort = "medium"
 
                 call_timeout = self.config.llm_timeout_s
                 if remaining is not None:
@@ -302,10 +317,10 @@ class QwenCadAgent:
                 try:
                     raw_reply = self._call_llm(messages, reasoning_effort=turn_effort, timeout_s=call_timeout)
                 except (APITimeoutError, TimeoutError) as exc:
-                    rem_after = (global_deadline - time.monotonic()) if global_deadline is not None else 120.0
-                    if turn_effort != "low" and self.config.thinking_mode != "off" and rem_after >= 35.0:
+                    rem_after = (global_deadline - time.monotonic()) if global_deadline is not None else 160.0
+                    if turn_effort != "none" and self.config.thinking_mode != "off" and rem_after >= 30.0:
                         logger.warning(
-                            "[%s] turn %d timed out (%s); retrying fast low-reasoning pass.",
+                            "[%s] turn %d timed out (%s); retrying instant non-thinking pass.",
                             name,
                             turn,
                             exc,
@@ -313,11 +328,11 @@ class QwenCadAgent:
                         try:
                             raw_reply = self._call_llm(
                                 messages,
-                                reasoning_effort="low",
-                                timeout_s=min(90.0, rem_after - 10.0),
+                                reasoning_effort="none",
+                                timeout_s=min(150.0, rem_after - 10.0),
                             )
                         except Exception as exc2:
-                            logger.warning("[%s] LLM fast retry failed on turn %d: %s", name, turn, exc2)
+                            logger.warning("[%s] LLM non-thinking retry failed on turn %d: %s", name, turn, exc2)
                             break
                     else:
                         logger.warning("[%s] LLM call timed out on turn %d: %s", name, turn, exc)
@@ -336,6 +351,7 @@ class QwenCadAgent:
                 )
 
                 if not exec_res.ok or exec_res.step_path is None:
+                    prev_exec_failed = True
                     tb_tail = "\n".join(exec_res.traceback_text.splitlines()[-15:])
                     err_report = f"CadQuery script failed to execute:\n{exec_res.error}"
                     if tb_tail:
@@ -349,11 +365,13 @@ class QwenCadAgent:
                 try:
                     telemetry, diff, view_eval, score = self._evaluate_step(exec_res.step_path, facts, views)
                 except Exception as exc:
+                    prev_exec_failed = True
                     last_code = code
                     last_diag = f"Generated STEP failed post-export inspection: {exc}"
                     last_diff_png = best_diff_png
                     continue
 
+                prev_exec_failed = False
                 diag_lines = diff.summary_lines(telemetry, facts or {})
                 diag_lines.append(
                     f"- Visual 8-view Silhouette IoU: mean={view_eval.mean_silhouette_iou:.3f}, "
@@ -392,6 +410,34 @@ class QwenCadAgent:
                     telemetry.through_holes_genus,
                 )
 
+                prev_best_score = best_score
+                prev_best_diff = best_diff
+                prev_best_code = best_code
+                is_same = False
+                if prev_best_score is None or score.total > prev_best_score.total + 0.002:
+                    stagnant_streak = 0
+                    no_improve_streak = 0
+                else:
+                    no_improve_streak += 1
+                    is_same = (code.strip() == (prev_best_code or "").strip()) or (
+                        prev_best_diff is not None
+                        and abs(score.total - prev_best_score.total) <= 0.002
+                        and abs(diff.vol_err_pct - prev_best_diff.vol_err_pct) <= 0.25
+                    )
+                    if is_same:
+                        stagnant_streak += 1
+                    else:
+                        stagnant_streak = 0
+
+                stagnation_note = ""
+                if is_same and prev_best_score is not None and prev_best_diff is not None:
+                    stagnation_note = (
+                        f"STAGNATION WARNING: Your last edit produced virtually identical score/geometry "
+                        f"to the previous best (score={prev_best_score.total:.3f}, vol_err={prev_best_diff.vol_err_pct:+.1f}%). "
+                        f"Do NOT repeat the same script — materially change the structural geometry, "
+                        f"hole/boss coordinates, or profile cross-sections to fix the discrepancies below.\n"
+                    )
+
                 if best_score is None or score.total > best_score.total:
                     best_score = score
                     best_diff = diff
@@ -401,7 +447,7 @@ class QwenCadAgent:
                     best_diag = diag_report
                     best_diff_png = diff_png
                     last_code = code
-                    last_diag = diag_report
+                    last_diag = f"{stagnation_note}{diag_report}" if stagnation_note else diag_report
                     last_diff_png = diff_png
                     if _prefer_llm_over_floor(best_score, best_diff, best_ve, floor_score, floor_diff):
                         _atomic_copy_file(best_step_tmp, output_path)
@@ -409,7 +455,8 @@ class QwenCadAgent:
                     # Revert base code in prompt back to best candidate so repair doesn't spiral
                     last_code = best_code or code
                     last_diag = (
-                        f"Your previous edit lowered score ({score.total:.3f} < best {best_score.total:.3f}). "
+                        f"{stagnation_note}"
+                        f"Your previous edit did not improve score ({score.total:.3f} <= best {best_score.total:.3f}). "
                         f"Reverting to the previous best script.\n"
                         f"Latest attempt feedback:\n{diag_report}\n"
                         f"Previous best candidate telemetry:\n{best_diag or ''}"
@@ -418,6 +465,16 @@ class QwenCadAgent:
 
                 if self._should_early_exit(diff, view_eval, score, facts):
                     logger.info("[%s] Early-exit convergence achieved at turn %d (score=%.3f).", name, turn, score.total)
+                    break
+
+                if turn >= 2 and (stagnant_streak >= 2 or no_improve_streak >= 3):
+                    logger.info(
+                        "[%s] Stopping repair early at turn %d due to plateau (best score=%.3f, stagnant=%d).",
+                        name,
+                        turn,
+                        best_score.total if best_score else 0.0,
+                        stagnant_streak,
+                    )
                     break
 
             # Select best verified candidate between LLM solid and deterministic visual-hull floor

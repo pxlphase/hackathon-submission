@@ -165,6 +165,15 @@ result = a.union(b)
     assert not res_su.ok
     assert ".fuse(other)" in res_su.error
 
+    solid_vals_code = """
+import cadquery as cq
+a = cq.Solid.makeBox(10, 10, 10)
+result = a.vals()[0]
+"""
+    res_sv = execute_cadquery_script(solid_vals_code, tmp_path / "sv.stp")
+    assert not res_sv.ok
+    assert ".Solids()" in res_sv.error
+
     multi_code = """
 import cadquery as cq
 a = cq.Solid.makeBox(10, 10, 10)
@@ -174,6 +183,7 @@ result = cq.Compound.makeCompound([a, b])
     res_multi = execute_cadquery_script(multi_code, tmp_path / "multi.stp")
     assert not res_multi.ok
     assert "Expected exactly 1 Solid, produced 2 solids" in res_multi.error
+    assert "vol=1000.0" in res_multi.error and "X[30.0..40.0]" in res_multi.error
 
     # Verify strip_fillets_and_chamfers unwinds chained selectors cleanly
     bad_fillet_code = """
@@ -251,13 +261,28 @@ def test_inspector_parametric_telemetry_and_example_outputs():
         "cylindrical_holes_and_bores": [
             {"count": 2, "diameter": 10.0, "axis": "Z", "centres": [[20, 25, 6], [60, 25, 6]]},
         ],
+        "cylindrical_shafts_and_bosses": [
+            {"count": 1, "diameter": 12.0, "axis": "Z", "centres": [[40, 37, 15]]},
+        ],
     }
     diff_ok = compare_against_facts(tel, facts_match)
     assert diff_ok.max_bbox_err_pct < 0.1
     assert abs(diff_ok.vol_err_pct) < 0.1
     assert diff_ok.genus_diff == 0
     assert diff_ok.missing_hole_groups == []
+    assert diff_ok.missing_boss_groups == []
     assert not diff_ok.axis_swapped_hint
+
+    # Shifted cylindrical boss/hole centres report radial_offset mismatch
+    facts_shifted = dict(
+        facts_match,
+        cylindrical_shafts_and_bosses=[
+            {"count": 1, "diameter": 12.0, "axis": "Z", "centres": [[40, 10, 15]]},
+        ],
+    )
+    diff_shifted = compare_against_facts(tel, facts_shifted)
+    assert diff_shifted.missing_boss_groups
+    assert "radial_offset=27.0mm" in diff_shifted.missing_boss_groups[0]
 
     # Transposed axes triggers axis_swapped_hint
     facts_swapped = dict(facts_match, bounding_box_mm={"x": 80.0, "y": 18.0, "z": 50.0})
@@ -315,6 +340,33 @@ def test_renderer_prompts_diff_composite_and_flip_detection(tmp_path):
     assert diff_png is not None
     diff_im = Image.open(io.BytesIO(diff_png))
     assert diff_im.size[0] == 3 * 192
+
+    # Missing blind pocket (same outer silhouette) must render orange missing-internal-edge pixels
+    import numpy as np
+
+    pocket_target = (
+        cq.Workplane("XY")
+        .box(40.0, 30.0, 10.0, centered=(False, False, False))
+        .faces(">Z")
+        .workplane(centerOption="CenterOfBoundBox")
+        .circle(8.0)
+        .cutBlind(-4.0)
+    )
+    pt_mesh = tessellate_shape(pocket_target.val().wrapped, diag_mm=60.0)
+    pt_top = tmp_path / "view_4_top.png"
+    render_view(pt_mesh, "view_4_top", size=256).image.save(pt_top)
+    solid_box_mesh = tessellate_shape(
+        cq.Workplane("XY").box(40.0, 30.0, 10.0, centered=(False, False, False)).val().wrapped,
+        diag_mm=60.0,
+    )
+    ve_pocket = evaluate_views(solid_box_mesh, [pt_top], eval_size=192)
+    pocket_diff_png = build_visual_diff_composite(ve_pocket, worst_n=1, tile_px=192)
+    assert pocket_diff_png is not None
+    p_arr = np.asarray(Image.open(io.BytesIO(pocket_diff_png)).convert("RGB"))
+    orange_px = np.all(p_arr == np.array([255, 165, 0], dtype=np.uint8), axis=-1)
+    assert int(orange_px.sum()) > 10
+    repair_with_img = build_repair_messages(u0, "result = ...", "Missing pocket", diff_composite_png=pocket_diff_png)
+    assert "ORANGE" in repair_with_img[-1]["content"][1]["text"]
 
     # Mirror L-bracket across X axis -> evaluate against original PNGs must detect handedness flip
     l_mirrored = (
@@ -512,12 +564,12 @@ result = cq.Workplane("XY").box(5.0, 5.0, 5.0, centered=(False, False, False))
     e_client = _EffortRejectClient()
     agent6 = QwenCadAgent(config=cfg, client=e_client)
     assert agent6._plan_budget({"faces": 150})[0] == "medium"
-    assert agent6._plan_budget({"faces": 350})[0] == "xhigh"
+    assert agent6._plan_budget({"faces": 350})[0] == "medium"
     reply6 = agent6._call_llm([{"role": "user", "content": "hi"}], reasoning_effort="high", timeout_s=30.0)
     assert "box(40.0, 30.0, 10.0" in reply6
     assert e_client.calls[1].get("reasoning_effort") == "medium"
 
-    # 7. Timeout rescue on Turn 0 -> retries fast low-reasoning pass + repair turns cap xhigh down to medium
+    # 7. Timeout rescue on Turn 0 -> retries fast non-thinking pass (enable_thinking=False) + Turn 1 uses medium
     from openai import APITimeoutError
 
     class _FakeTimeout(APITimeoutError):
@@ -550,11 +602,24 @@ result = cq.Workplane("XY").box(5.0, 5.0, 5.0, centered=(False, False, False))
     s7 = agent7.generate_cad("Complex plate", views, None, out7, facts=complex_facts, case_name="case_to")
     assert not s7.used_fallback
     assert s7.turns_used == 2
-    assert to_client.calls[0].get("reasoning_effort") == "xhigh"
-    assert to_client.calls[1].get("reasoning_effort") == "low"
+    assert to_client.calls[0].get("reasoning_effort") == "medium"
+    assert "reasoning_effort" not in to_client.calls[1]
+    assert to_client.calls[1].get("extra_body", {}).get("chat_template_kwargs", {}).get("enable_thinking") is False
     assert to_client.calls[2].get("reasoning_effort") == "medium"
     assert inspect_step_file(out7).through_holes_genus == 1
     assert not list(tmp_path.glob(".tmp_*"))
+
+    # 8. Stagnation plateau warning & early exit before burning all turns + Turn 2 drops effort to low
+    cfg8 = _test_config(iou_early_exit=0.999, max_turns_simple=5)
+    client8 = _FakeOpenAIClient(lambda idx, kw: no_hole_script)
+    agent8 = QwenCadAgent(config=cfg8, client=client8)
+    s8 = agent8.generate_cad("Plate with hole", views, None, tmp_path / "stagnant.stp", facts=facts, case_name="case_stag")
+    assert s8.turns_used == 3  # stopped early at turn=2 instead of burning 5 turns
+    assert client8.completions.calls[0].get("reasoning_effort") == "medium"
+    assert client8.completions.calls[1].get("reasoning_effort") == "medium"
+    assert client8.completions.calls[2].get("reasoning_effort") == "low"
+    turn2_diag_txt = client8.completions.calls[2]["messages"][-1]["content"][0]["text"]
+    assert "STAGNATION WARNING" in turn2_diag_txt
 
 
 def test_submission_solid_check_rejects_mock_text(tmp_path):

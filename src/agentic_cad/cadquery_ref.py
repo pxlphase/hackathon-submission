@@ -16,7 +16,7 @@ CADQUERY_CHEATSHEET = """## Authoritative CadQuery 2.8 Reference (Strict BRep Ru
 
 2. **Verified Method Signatures & Common Traps**:
    - Prefer `.circle(r).extrude(h)` or `cq.Solid.makeCylinder(radius, height, pnt, dir)` over `Workplane.cylinder(height, radius)` (note `height` is FIRST in `Workplane.cylinder`!).
-   - **`Workplane.union(...)` vs `Solid.fuse(...)`**: `cq.Workplane` uses `.union(other)` / `.cut(other)`. Raw `cq.Solid` or `cq.Shape` objects (`cq.Solid.makeBox`, `.makeCylinder`, `.val()`) do **NOT** have `.union()` — use **`.fuse(other)`** (or wrap in `cq.Workplane("XY").newObject([solid])`).
+   - **`Workplane` vs `Solid`/`Compound` APIs**: Keep working with `cq.Workplane` objects (`.union(other)`, `.cut(other)`, `.vals()`, `.faces(...)`). Raw `cq.Solid` / `cq.Compound` (`cq.Solid.makeBox`, `.val()`) do **NOT** have `.union()`, `.vals()`, or `.faces()` — use **`.fuse(other)`** / **`.cut(other)`** / **`.Solids()`**, or wrap via `cq.Workplane("XY").newObject([solid])`.
    - **`lineTo(x, y)`, `moveTo(x, y)`, `line(dx, dy)` take TWO separate floats (`lineTo(10, 20)`), NEVER a tuple `lineTo((10, 20))`!** Use `.line(dx, dy)` (not `.rLineTo()`) for relative lines; only `.polyline([(x1, y1), ...])` takes a list of tuples.
    - **`translate((dx, dy, dz))` & `rotate((0,0,0), (0,0,1), deg)`**: `.translate(...)` takes ONE 3-tuple (never 3 args); use `.rotate(p1, p2, deg)` or `.transformed(rotate=(rx, ry, rz), offset=(ox, oy, oz))` (there is NO `.rotateX/Y/Z()`).
    - **`cutBlind` direction**: `.faces(">Z").workplane(centerOption="CenterOfBoundBox")` has outward normal `+Z` -> pass **negative depth** `.cutBlind(-d)` (or `workplane(invert=True)` + `.cutBlind(d)`). Positive `.cutBlind(+d)` on an outward face cuts into empty air!
