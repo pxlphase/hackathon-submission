@@ -15,7 +15,7 @@ from OCP.TopExp import TopExp
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Shape
 from OCP.TopTools import TopTools_IndexedMapOfShape
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 # Camera definitions matching README.md:
 # Each entry maps view_name -> (right_vec, up_vec, toward_viewer_vec)
@@ -367,6 +367,17 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter / union) if union > 0 else 0.0
 
 
+def _extract_target_edge_mask(tgt_im: Image.Image, tgt_rgb: np.ndarray) -> np.ndarray:
+    """Extract sharp dark BRep crease lines & outline without misclassifying dark shaded faces."""
+    fg = np.any(tgt_rgb < 245, axis=-1)
+    max_rgb = np.max(tgt_rgb, axis=-1)
+    very_dark = max_rgb < 55
+    lum = np.asarray(tgt_im.convert("L"), dtype=np.int16)
+    local_hi = np.asarray(tgt_im.convert("L").filter(ImageFilter.MaxFilter(5)), dtype=np.int16)
+    local_contrast = (local_hi - lum >= 32) & (lum < 120)
+    return fg & (very_dark | local_contrast)
+
+
 def evaluate_views(
     model: TessellatedModel,
     target_views: list[Path],
@@ -380,10 +391,11 @@ def evaluate_views(
         view_name = path.stem
         if view_name not in VIEW_CAMERAS:
             continue
-        tgt_rgb = np.asarray(Image.open(path).convert("RGB"))
+        tgt_im = Image.open(path).convert("RGB")
+        tgt_rgb = np.asarray(tgt_im)
         tgt_mask_raw = _erode_1px(np.any(tgt_rgb < 245, axis=-1))
-        # Extract dark BRep crease lines + outer boundary before normalization
-        tgt_dark = np.max(tgt_rgb, axis=-1) < 115
+        # Extract sharp dark BRep crease lines + outer boundary before normalization
+        tgt_dark = _extract_target_edge_mask(tgt_im, tgt_rgb)
         tgt_mask, tgt_edge, tgt_aspect = _normalize_mask_box(tgt_mask_raw, tgt_dark, eval_size)
 
         rv = render_view(model, view_name, size=eval_size)
@@ -470,7 +482,7 @@ def build_visual_diff_composite(
 
         # Normalized red/blue silhouette + orange missing-internal-edge difference overlay
         tgt_mask_raw = _erode_1px(np.any(tgt_raw_arr < 245, axis=-1))
-        tgt_edge_raw = np.max(tgt_raw_arr, axis=-1) < 115
+        tgt_edge_raw = _extract_target_edge_mask(tgt_raw_im, tgt_raw_arr)
         t_norm, t_edge_norm, _ = _normalize_mask_box(tgt_mask_raw, tgt_edge_raw, tile_px)
         g_norm, g_edge_norm, _ = _normalize_mask_box(rv.mask, rv.edge_mask, tile_px)
 

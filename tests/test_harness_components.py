@@ -31,6 +31,7 @@ from agentic_cad.prompts import (
 )
 from agentic_cad.renderer import (
     VIEW_CAMERAS,
+    _extract_target_edge_mask,
     build_visual_diff_composite,
     evaluate_views,
     render_view,
@@ -367,6 +368,14 @@ def test_renderer_prompts_diff_composite_and_flip_detection(tmp_path):
     assert int(orange_px.sum()) > 10
     repair_with_img = build_repair_messages(u0, "result = ...", "Missing pocket", diff_composite_png=pocket_diff_png)
     assert "ORANGE" in repair_with_img[-1]["content"][1]["text"]
+
+    # Dark shaded bronze faces on real target PNGs must not flood the crease-edge extractor
+    tc5_iso = REPO_ROOT / "artifacts/inputs/test_case_5/images/view_6_iso_front_right_top.png"
+    tc5_im = Image.open(tc5_iso).convert("RGB")
+    tc5_arr = np.asarray(tc5_im)
+    tc5_fg = np.any(tc5_arr < 245, axis=-1)
+    tc5_edge = _extract_target_edge_mask(tc5_im, tc5_arr)
+    assert 0.01 < (int(tc5_edge.sum()) / max(1, int(tc5_fg.sum()))) < 0.12
 
     # Mirror L-bracket across X axis -> evaluate against original PNGs must detect handedness flip
     l_mirrored = (
