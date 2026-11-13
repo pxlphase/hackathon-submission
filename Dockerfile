@@ -1,10 +1,24 @@
 FROM python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:0.10.6 /uv /uvx /bin/
 
+# Install minimal headless shared libraries linked by cadquery-ocp (OpenCASCADE)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglx0 \
+    libx11-6 \
+    libxext6 \
+    libxrender1 \
+    libexpat1 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp \
+    MPLCONFIGDIR=/tmp/matplotlib
 
 # Install dependencies (cached layer, only rebuilt when the lockfile changes)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -21,10 +35,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Agent settings, frozen with your commit (README: Configuration). After code freeze, the values in
-# your handed-over <team>.env replace these.
+# Non-secret agent runtime defaults (README: Configuration).
+# Endpoint credentials are injected via <team>.env at code freeze, or set here for dev builds.
+ENV CAD_GLOBAL_TIMEOUT_S=1140 \
+    CAD_LLM_TIMEOUT_S=180 \
+    CAD_MAX_WORKERS=2 \
+    CAD_TOOLS=1 \
+    CAD_MAX_TOOL_STEPS=2 \
+    CAD_BEST_OF_K=1 \
+    CAD_IOU_EARLY_EXIT=0.95 \
+    CAD_THINKING=auto \
+    CAD_REASONING_EFFORT=auto
+
 # ENV OPENAI_BASE_URL=http://<your Brev instance>:8000/v1 \
 #     OPENAI_API_KEY=<your vLLM --api-key> \
-#     OPENAI_MODEL=<model>
+#     OPENAI_MODEL=Qwen/Qwen3.8-27B-FP8
 
 CMD ["python", "scripts/main.py"]
