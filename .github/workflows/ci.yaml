@@ -10,18 +10,13 @@ permissions:
 
 jobs:
   test:
+    # Run tests inside the Docker image so headless OpenCASCADE/libGL libs and image build are both verified.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.3
-      - run: uv run pytest
-
-  build:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: docker build .
+      - run: docker build -t forge-ci .
+      - run: docker run --rm forge-ci uv run --locked pytest -q
 
   submit:
     # Skipped until the team has set the variables/secrets from the organisers
