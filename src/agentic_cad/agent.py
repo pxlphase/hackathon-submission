@@ -8,11 +8,11 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from openai import APITimeoutError, BadRequestError, OpenAI
+from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI
 
 from agentic_cad.cadquery_ref import extract_python_code
 from agentic_cad.config import HarnessConfig
@@ -131,6 +131,7 @@ class QwenCadAgent:
         )
         self._state_lock = threading.Lock()
         self._tools_supported = bool(self.config.enable_tools)
+        self._endpoint_online = True
 
     def _plan_budget(self, facts: dict[str, Any] | None) -> tuple[str, int]:
         """Choose reasoning effort and max repair turns from BRep face complexity and config."""
@@ -150,6 +151,68 @@ class QwenCadAgent:
 
     def _is_call_llm_monkeypatched(self) -> bool:
         return getattr(self._call_llm, "__func__", None) is not _ORIGINAL_CALL_LLM
+
+    def resolve_endpoint_model(self, timeout_s: float = 5.0) -> bool:
+        """Probe /v1/models once upfront, verify reachability, and auto-align served model ID if unambiguous."""
+        if self._is_call_llm_monkeypatched():
+            return True
+        models_res = getattr(self.client, "models", None)
+        list_fn = getattr(models_res, "list", None)
+        if not callable(list_fn):
+            return True
+        try:
+            try:
+                page = list_fn(timeout=timeout_s)
+            except TypeError:
+                page = list_fn()
+        except Exception as exc:
+            with self._state_lock:
+                self._endpoint_online = False
+            logger.warning(
+                "VLM endpoint unreachable at %s (%s) — running deterministic CPU BRep reconstruction only.",
+                self.config.openai_base_url,
+                exc,
+            )
+            return False
+
+        raw_items = getattr(page, "data", None)
+        if raw_items is None and isinstance(page, dict):
+            raw_items = page.get("data")
+        served_ids = [
+            str(getattr(m, "id", "") or (m.get("id", "") if isinstance(m, dict) else "")).strip()
+            for m in (raw_items or [])
+        ]
+        served_ids = [mid for mid in served_ids if mid]
+        with self._state_lock:
+            self._endpoint_online = True
+            configured = self.config.openai_model
+            if configured in served_ids:
+                logger.info("Verified VLM endpoint %s serving model=%s.", self.config.openai_base_url, configured)
+                return True
+            if len(served_ids) == 1:
+                self.config = replace(self.config, openai_model=served_ids[0])
+                logger.warning(
+                    "Configured OPENAI_MODEL=%s not served at %s (found %s); auto-switching to %s.",
+                    configured,
+                    self.config.openai_base_url,
+                    served_ids,
+                    served_ids[0],
+                )
+                return True
+        if served_ids:
+            logger.warning(
+                "Configured OPENAI_MODEL=%s not in served models %s at %s; keeping configured name.",
+                self.config.openai_model,
+                served_ids,
+                self.config.openai_base_url,
+            )
+        else:
+            logger.warning(
+                "VLM endpoint %s returned no model IDs in /v1/models; keeping OPENAI_MODEL=%s.",
+                self.config.openai_base_url,
+                self.config.openai_model,
+            )
+        return True
 
     def _invoke_completion(
         self,
@@ -523,6 +586,12 @@ class QwenCadAgent:
                         return _BranchOutcome(ok=False, llm_failed=True, stepdown_effort=stepdown_effort)
                 logger.warning("[%s] LLM call timed out on turn %d%s: %s", case_name, turn, branch_label, exc)
                 return _BranchOutcome(ok=False, llm_failed=True, stepdown_effort=stepdown_effort)
+            except (APIConnectionError, ConnectionRefusedError) as exc:
+                if not legacy_patched:
+                    with self._state_lock:
+                        self._endpoint_online = False
+                logger.warning("[%s] LLM connection error on turn %d%s: %s", case_name, turn, branch_label, exc)
+                return _BranchOutcome(ok=False, llm_failed=True, stepdown_effort=stepdown_effort)
             except Exception as exc:
                 logger.warning("[%s] LLM call failed on turn %d%s: %s", case_name, turn, branch_label, exc)
                 return _BranchOutcome(ok=False, llm_failed=True, stepdown_effort=stepdown_effort)
@@ -770,17 +839,20 @@ class QwenCadAgent:
 
         with self._state_lock:
             tools_for_prompt = self._tools_supported and not self._is_call_llm_monkeypatched()
+            endpoint_online = self._endpoint_online or self._is_call_llm_monkeypatched()
 
-        initial_user_content = build_initial_user_content(
-            case_name=name,
-            description=prompt,
-            facts=facts,
-            views=views,
-            context=context,
-            tile_px=self.config.contact_tile_px,
-            context_px=self.config.context_max_px,
-            enable_tools=tools_for_prompt,
-        )
+        initial_user_content: list[dict[str, Any]] = []
+        if endpoint_online:
+            initial_user_content = build_initial_user_content(
+                case_name=name,
+                description=prompt,
+                facts=facts,
+                views=views,
+                context=context,
+                tile_px=self.config.contact_tile_px,
+                context_px=self.config.context_max_px,
+                enable_tools=tools_for_prompt,
+            )
 
         best_score: SurrogateScore | None = None
         best_diff: Any = None
@@ -823,7 +895,21 @@ class QwenCadAgent:
                 if not floor_step.is_file():
                     floor_step = None
 
-            for turn in range(max_turns):
+            with self._state_lock:
+                endpoint_online = self._endpoint_online or self._is_call_llm_monkeypatched()
+            if endpoint_online and not initial_user_content:
+                initial_user_content = build_initial_user_content(
+                    case_name=name,
+                    description=prompt,
+                    facts=facts,
+                    views=views,
+                    context=context,
+                    tile_px=self.config.contact_tile_px,
+                    context_px=self.config.context_max_px,
+                    enable_tools=tools_for_prompt,
+                )
+
+            for turn in range(max_turns if endpoint_online else 0):
                 remaining = (global_deadline - time.monotonic()) if global_deadline is not None else None
                 if remaining is not None and remaining < 12.0:
                     logger.warning("[%s] Global budget nearly exhausted (%.1fs left); finalizing.", name, remaining)

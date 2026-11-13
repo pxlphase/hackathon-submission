@@ -39,10 +39,10 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Endpoint credentials are injected via <team>.env at code freeze, or set here for dev builds.
 ENV CAD_GLOBAL_TIMEOUT_S=1140 \
     CAD_LLM_TIMEOUT_S=180 \
-    CAD_MAX_WORKERS=3 \
+    CAD_MAX_WORKERS=2 \
     CAD_TOOLS=1 \
-    CAD_MAX_TOOL_STEPS=3 \
-    CAD_BEST_OF_K=2 \
+    CAD_MAX_TOOL_STEPS=2 \
+    CAD_BEST_OF_K=1 \
     CAD_IOU_EARLY_EXIT=0.95 \
     CAD_THINKING=auto \
     CAD_REASONING_EFFORT=auto

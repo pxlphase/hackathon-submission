@@ -96,17 +96,19 @@ def main(args: argparse.Namespace) -> None:
 
     global_deadline = t0 + cfg.global_timeout_s
     agent = QwenCadAgent(config=cfg)
+    vlm_online = agent.resolve_endpoint_model()
     # Schedule simplest parts first so fast high-scoring parts finish upfront instead of starving at deadline
     ordered_cases = sorted(
         test_cases,
         key=lambda tc: int((tc.facts or {}).get("faces") or 50),
     )
-    workers = min(cfg.max_workers, len(ordered_cases))
+    workers = min(cfg.max_workers, len(ordered_cases)) if vlm_online else 1
     logger.info(
-        "Running %d test cases with workers=%d, model=%s, global_budget=%.0fs",
+        "Running %d test cases with workers=%d, model=%s, vlm_online=%s, global_budget=%.0fs",
         len(ordered_cases),
         workers,
-        cfg.openai_model,
+        agent.config.openai_model,
+        vlm_online,
         cfg.global_timeout_s,
     )
 

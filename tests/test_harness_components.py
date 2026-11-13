@@ -107,7 +107,14 @@ def test_config_from_env_and_dotenv(tmp_path, monkeypatch):
     monkeypatch.delenv("CAD_MAX_WORKERS", raising=False)
     monkeypatch.delenv("CAD_GLOBAL_TIMEOUT_S", raising=False)
     monkeypatch.delenv("CAD_TOOLS", raising=False)
+    monkeypatch.delenv("CAD_MAX_TOOL_STEPS", raising=False)
     monkeypatch.delenv("CAD_BEST_OF_K", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    default_cfg = HarnessConfig.from_env(load_dotenv=False)
+    assert default_cfg.max_workers == 2
+    assert default_cfg.max_tool_steps == 2
+    assert default_cfg.best_of_k == 1
 
     load_dotenv_if_present(env_file)
     cfg = HarnessConfig.from_env(load_dotenv=False)
@@ -117,8 +124,8 @@ def test_config_from_env_and_dotenv(tmp_path, monkeypatch):
     assert cfg.global_timeout_s == 1140.0
     assert cfg.openai_model == "Qwen/Qwen3.8-27B-FP8"
     assert cfg.enable_tools is True
-    assert cfg.best_of_k == 2
-    assert cfg.max_tool_steps == 3
+    assert cfg.best_of_k == 1
+    assert cfg.max_tool_steps == 2
 
 
 def test_extract_python_code_and_validate_ast():
@@ -1178,3 +1185,157 @@ result = cq.Workplane("XY").box(40.0, 30.0, 10.0, centered=(False, False, False)
     assert len(bok_client.completions.calls) == 2
     assert sorted(c["seed"] for c in bok_client.completions.calls) == [42, 43]
     assert inspect_step_file(tmp_path / "bok.stp").through_holes_genus == 1
+
+
+def test_fallback_smooth_arc_and_inclined_major_bore(tmp_path):
+    from agentic_cad.fallback import _cut_facts_bores
+
+    # 1. Semicircular saddle block should reconstruct with smooth analytical CYLINDER faces (not staircases)
+    saddle = cq.Workplane("XY").box(40.0, 30.0, 24.0, centered=(False, False, False)).cut(
+        cq.Workplane(
+            cq.Solid.makeCylinder(
+                8.0,
+                34.0,
+                cq.Vector(20.0, -2.0, 24.0),
+                cq.Vector(0.0, 1.0, 0.0),
+            )
+        )
+    )
+    solid = saddle.val().wrapped
+    tel_tgt = inspect_shape(solid)
+    diag = (40.0**2 + 30.0**2 + 24.0**2) ** 0.5
+    mesh = tessellate_shape(solid, diag_mm=diag)
+    views: list[Path] = []
+    for name in VIEW_CAMERAS:
+        p = tmp_path / f"{name}.png"
+        render_view(mesh, name, size=256).image.save(p)
+        views.append(p)
+    facts = {
+        "solids": 1,
+        "faces": tel_tgt.faces,
+        "edges": tel_tgt.edges,
+        "through_holes_genus": tel_tgt.through_holes_genus,
+        "bounding_box_mm": tel_tgt.bounding_box_mm,
+        "volume_mm3": tel_tgt.volume_mm3,
+        "surface_area_mm2": tel_tgt.surface_area_mm2,
+    }
+    out_arc = tmp_path / "saddle_fb.stp"
+    assert generate_fallback_step(views, facts, out_arc)
+    tel_arc = inspect_step_file(out_arc)
+    assert tel_arc.is_valid and tel_arc.solids == 1 and tel_arc.shells == 1
+    assert tel_arc.face_types.get("CYLINDER", 0) >= 1
+    assert tel_arc.faces <= 20
+    ve_arc = evaluate_views(tessellate_shape(load_step_shape(out_arc), diag_mm=diag), views, eval_size=192)
+    assert ve_arc.mean_silhouette_iou >= 0.94
+
+    # 2. Inclined major bore whose short raw length yields dg=0 at step 1 (67mm) must reach step 2 (92.4mm) to punch through
+    block = cq.Solid.makeBox(80.0, 60.0, 60.0)
+    oblique_facts = {
+        "through_holes_genus": 1,
+        "cylindrical_holes_and_bores": [
+            {
+                "count": 1,
+                "diameter": 20.0,
+                "axis": "(0.0, 0.7071, 0.7071)",
+                "lengths": [42.0],
+                "centres": [[40.0, 30.0, 30.0]],
+            }
+        ],
+    }
+    cut = _cut_facts_bores(block, oblique_facts, 80.0, 60.0, 60.0)
+    tel_cut = inspect_shape(cut.wrapped)
+    assert tel_cut.is_valid and tel_cut.solids == 1 and tel_cut.shells == 1
+    assert tel_cut.through_holes_genus == 1
+
+
+def test_agent_resolve_endpoint_model_and_offline_skip(tmp_path):
+    from openai import APIConnectionError
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    views, facts = _make_rendered_target_part(target_dir)
+
+    good_script = """```python
+import cadquery as cq
+result = (
+    cq.Workplane("XY")
+    .box(40.0, 30.0, 10.0, centered=(False, False, False))
+    .faces(">Z")
+    .workplane(centerOption="CenterOfBoundBox")
+    .hole(12.0)
+)
+```"""
+
+    # 1. Single served model auto-switches configured OPENAI_MODEL seamlessly
+    class _ServedModelClient:
+        def __init__(self):
+            self.calls = []
+            self.models = SimpleNamespace(
+                list=lambda timeout=5.0: SimpleNamespace(data=[SimpleNamespace(id="Qwen/Qwen3.8-27B")])
+            )
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=good_script, reasoning_content=None),
+                    )
+                ]
+            )
+
+    sm_client = _ServedModelClient()
+    agent_sw = QwenCadAgent(config=_test_config(openai_model="Qwen/Qwen3.8-27B-FP8", iou_early_exit=0.90), client=sm_client)
+    assert agent_sw.resolve_endpoint_model() is True
+    assert agent_sw.config.openai_model == "Qwen/Qwen3.8-27B"
+    s_sw = agent_sw.generate_cad("Plate with hole", views, None, tmp_path / "sw.stp", facts=facts, case_name="case_sw")
+    assert not s_sw.used_fallback
+    assert sm_client.calls[0]["model"] == "Qwen/Qwen3.8-27B"
+
+    # 2. Unreachable endpoint returns False and fast-skips LLM calls without touching completions
+    class _OfflineClient:
+        def __init__(self):
+            self.calls = []
+            self.models = SimpleNamespace(list=self._fail_models)
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _fail_models(self, timeout=5.0):
+            raise ConnectionRefusedError("Connection refused")
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            raise AssertionError("completions.create should not be called when offline")
+
+    off_client = _OfflineClient()
+    agent_off = QwenCadAgent(config=_test_config(), client=off_client)
+    assert agent_off.resolve_endpoint_model() is False
+    s_off = agent_off.generate_cad("Plate with hole", views, None, tmp_path / "off.stp", facts=facts, case_name="case_off")
+    assert s_off.used_fallback is True
+    assert s_off.turns_used == 0
+    assert s_off.score > 0.80
+    assert off_client.calls == []
+    assert inspect_step_file(tmp_path / "off.stp").is_valid
+
+    # 3. Mid-run APIConnectionError marks endpoint offline for subsequent queued cases
+    class _FakeConnErr(APIConnectionError):
+        def __init__(self, msg: str):
+            Exception.__init__(self, msg)
+
+    class _DropConnClient:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            raise _FakeConnErr("Connection error.")
+
+    drop_client = _DropConnClient()
+    agent_drop = QwenCadAgent(config=_test_config(), client=drop_client)
+    s_d1 = agent_drop.generate_cad("Case 1", views, None, tmp_path / "d1.stp", facts=facts, case_name="case_d1")
+    s_d2 = agent_drop.generate_cad("Case 2", views, None, tmp_path / "d2.stp", facts=facts, case_name="case_d2")
+    assert s_d1.used_fallback and s_d2.used_fallback
+    assert len(drop_client.calls) == 1
+    assert s_d2.turns_used == 0

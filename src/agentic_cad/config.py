@@ -64,7 +64,7 @@ class HarnessConfig:
     openai_base_url: str
     openai_api_key: str
     openai_model: str
-    max_workers: int = 3
+    max_workers: int = 2
     global_timeout_s: float = 1140.0
     exec_timeout_s: float = 45.0
     llm_timeout_s: float = 180.0
@@ -77,8 +77,8 @@ class HarnessConfig:
 
     # Interactive VLM/CAD inspection tools & parallel Turn-0 candidate selection
     enable_tools: bool = True
-    max_tool_steps: int = 3
-    best_of_k: int = 2
+    max_tool_steps: int = 2
+    best_of_k: int = 1
 
     # Convergence & Tier-1/Tier-2 thresholds
     iou_early_exit: float = 0.95
@@ -108,7 +108,7 @@ class HarnessConfig:
             openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip() or "EMPTY",
             openai_model=os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.8-27B-FP8").strip()
             or "Qwen/Qwen3.8-27B-FP8",
-            max_workers=max(1, _env_int("CAD_MAX_WORKERS", 3)),
+            max_workers=max(1, _env_int("CAD_MAX_WORKERS", 2)),
             global_timeout_s=max(60.0, _env_float("CAD_GLOBAL_TIMEOUT_S", 1140.0)),
             exec_timeout_s=max(10.0, _env_float("CAD_EXEC_TIMEOUT_S", 45.0)),
             llm_timeout_s=max(30.0, _env_float("CAD_LLM_TIMEOUT_S", 180.0)),
@@ -119,8 +119,8 @@ class HarnessConfig:
             thinking_mode=os.environ.get("CAD_THINKING", "auto").strip().lower() or "auto",
             reasoning_effort=os.environ.get("CAD_REASONING_EFFORT", "auto").strip().lower() or "auto",
             enable_tools=_env_bool("CAD_TOOLS", True),
-            max_tool_steps=max(0, min(6, _env_int("CAD_MAX_TOOL_STEPS", 3))),
-            best_of_k=max(1, min(4, _env_int("CAD_BEST_OF_K", 2))),
+            max_tool_steps=max(0, min(6, _env_int("CAD_MAX_TOOL_STEPS", 2))),
+            best_of_k=max(1, min(4, _env_int("CAD_BEST_OF_K", 1))),
             iou_early_exit=_env_float("CAD_IOU_EARLY_EXIT", 0.95),
             vol_tol_pct=_env_float("CAD_VOL_TOL_PCT", 2.0),
             area_tol_pct=_env_float("CAD_AREA_TOL_PCT", 3.0),
