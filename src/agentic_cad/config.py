@@ -57,11 +57,12 @@ class HarnessConfig:
     global_timeout_s: float = 3300.0
     exec_timeout_s: float = 45.0
     llm_timeout_s: float = 300.0
-    max_tokens: int = 24576
+    max_tokens: int = 16384
     temperature: float = 0.8
     top_p: float = 0.95
     seed: int = 42
     thinking_mode: str = "auto"  # "auto" | "on" | "off"
+    reasoning_effort: str = "auto"  # "auto" | "low" | "medium" | "none"
 
     # Convergence & Tier-1/Tier-2 thresholds
     iou_early_exit: float = 0.95
@@ -95,11 +96,12 @@ class HarnessConfig:
             global_timeout_s=max(60.0, _env_float("CAD_GLOBAL_TIMEOUT_S", 3300.0)),
             exec_timeout_s=max(10.0, _env_float("CAD_EXEC_TIMEOUT_S", 45.0)),
             llm_timeout_s=max(30.0, _env_float("CAD_LLM_TIMEOUT_S", 300.0)),
-            max_tokens=max(2048, _env_int("CAD_MAX_TOKENS", 24576)),
+            max_tokens=max(2048, _env_int("CAD_MAX_TOKENS", 16384)),
             temperature=_env_float("CAD_TEMPERATURE", 0.8),
             top_p=_env_float("CAD_TOP_P", 0.95),
             seed=_env_int("CAD_SEED", 42),
             thinking_mode=os.environ.get("CAD_THINKING", "auto").strip().lower() or "auto",
+            reasoning_effort=os.environ.get("CAD_REASONING_EFFORT", "auto").strip().lower() or "auto",
             iou_early_exit=_env_float("CAD_IOU_EARLY_EXIT", 0.95),
             vol_tol_pct=_env_float("CAD_VOL_TOL_PCT", 2.0),
             area_tol_pct=_env_float("CAD_AREA_TOL_PCT", 3.0),

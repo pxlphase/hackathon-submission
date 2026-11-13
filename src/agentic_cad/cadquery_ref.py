@@ -18,7 +18,10 @@ CADQUERY_CHEATSHEET = """## Authoritative CadQuery 2.8 Reference (Strict BRep Ru
    - Prefer `.circle(r).extrude(h)` or `cq.Solid.makeCylinder(radius, height, pnt, dir)` over `Workplane.cylinder(height, radius)` (note `height` is FIRST in `Workplane.cylinder`!).
    - **`Workplane` vs `Solid`/`Compound` APIs**: Keep working with `cq.Workplane` objects (`.union(other)`, `.cut(other)`, `.vals()`, `.faces(...)`). Raw `cq.Solid` / `cq.Compound` (`cq.Solid.makeBox`, `.val()`) do **NOT** have `.union()`, `.vals()`, or `.faces()` — use **`.fuse(other)`** / **`.cut(other)`** / **`.Solids()`**, or wrap via `cq.Workplane("XY").newObject([solid])`.
    - **`lineTo(x, y)`, `moveTo(x, y)`, `line(dx, dy)` take TWO separate floats (`lineTo(10, 20)`), NEVER a tuple `lineTo((10, 20))`!** Use `.line(dx, dy)` (not `.rLineTo()`) for relative lines; only `.polyline([(x1, y1), ...])` takes a list of tuples.
+   - **Angled planes & holes (NO `cq.Matrix`)**: NEVER use `cq.Matrix().rotate(...)` or `._rotate(...)` — `Matrix` has NO `.rotate()` method! Build angled cutters with `cutter = cq.Workplane(cq.Plane(origin=(cx, cy, cz), normal=(nx, ny, nz))).circle(r).extrude(L * 0.5, both=True); result = result.cut(cutter)` (note a standalone `cq.Workplane(Plane)` has NO base solid, so NEVER call `.cutThruAll()` or `.cutBlind()` directly on it!). Or build `cyl = cq.Solid.makeCylinder(r, L, cq.Vector(cx - 0.5*L*nx, cy - 0.5*L*ny, cz - 0.5*L*nz), cq.Vector(nx, ny, nz)); result = result.cut(cq.Workplane("XY").newObject([cyl]))` (remember `facts.json` `centre` is the cylinder **midpoint**, so start `makeCylinder` at `centre - 0.5*L*dir`).
+   - **`box(...)` has NO `corner=` kwarg**: Use `.box(x, y, z, centered=(False, False, False)).translate((x0, y0, z0))`.
    - **`translate((dx, dy, dz))` & `rotate((0,0,0), (0,0,1), deg)`**: `.translate(...)` takes ONE 3-tuple (never 3 args); use `.rotate(p1, p2, deg)` or `.transformed(rotate=(rx, ry, rz), offset=(ox, oy, oz))` (there is NO `.rotateX/Y/Z()`).
+   - **Keep one connected solid**: Overlap protruding ribs/tabs/flanges into the base body by `>= 0.5 mm` before `.union(...)` (coplanar touching faces can remain separate solids). NEVER start an empty `cq.Workplane("XY").union(other)` — start from the base solid `result = base.union(part2)`.
    - **`cutBlind` direction**: `.faces(">Z").workplane(centerOption="CenterOfBoundBox")` has outward normal `+Z` -> pass **negative depth** `.cutBlind(-d)` (or `workplane(invert=True)` + `.cutBlind(d)`). Positive `.cutBlind(+d)` on an outward face cuts into empty air!
    - **Holes** (already invert inward automatically on selected planar faces):
      - `.hole(diameter, depth=None)` — omit `depth` (or pass `None`) for a through-hole. NEVER pass `through=True`.
@@ -75,6 +78,7 @@ _HALLUCINATED_METHODS = {
     "rotateX": "CadQuery has no `.rotateX()`; use `.rotate((0, 0, 0), (1, 0, 0), angle_deg)` or `.transformed(rotate=(rx, ry, rz))`.",
     "rotateY": "CadQuery has no `.rotateY()`; use `.rotate((0, 0, 0), (0, 1, 0), angle_deg)` or `.transformed(rotate=(rx, ry, rz))`.",
     "rotateZ": "CadQuery has no `.rotateZ()`; use `.rotate((0, 0, 0), (0, 0, 1), angle_deg)` or `.transformed(rotate=(rx, ry, rz))`.",
+    "_rotate": "Do not call private `Matrix._rotate()`; use `cq.Plane(origin=..., normal=...)`, `.rotate(p1, p2, angle_deg)`, or `.transformed(rotate=(rx, ry, rz))`.",
 }
 
 _HALLUCINATED_CQ_ATTRS = {
@@ -82,6 +86,7 @@ _HALLUCINATED_CQ_ATTRS = {
     "Box": "Use `cq.Workplane('XY').box(x, y, z)` or `cq.Solid.makeBox(x, y, z)` instead of `cq.Box`.",
     "Cone": "Use `cq.Solid.makeCone(r1, r2, h, pnt, dir)` instead of `cq.Cone`.",
     "Sphere": "Use `cq.Workplane('XY').sphere(r)` or `cq.Solid.makeSphere(r)` instead of `cq.Sphere`.",
+    "Matrix": "Do not construct `cq.Matrix()` directly (it has no `.rotate()` method); use `cq.Plane(origin=..., normal=...)`, `.rotate(p1, p2, angle_deg)`, or `.transformed(rotate=(rx, ry, rz))`.",
 }
 
 
@@ -134,15 +139,26 @@ def validate_cadquery_ast(code: str) -> list[str]:
             if isinstance(node.target, ast.Name) and node.target.id == "result":
                 assigns_result = True
         elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in _DISALLOWED_CALLS:
-                if node.func.id == "show_object":
-                    errors.append("Do not call `show_object(...)`; assign the final solid to `result`.")
-                else:
-                    errors.append(f"Disallowed call `{node.func.id}(...)`.")
+            if isinstance(node.func, ast.Name):
+                if node.func.id in _DISALLOWED_CALLS:
+                    if node.func.id == "show_object":
+                        errors.append("Do not call `show_object(...)`; assign the final solid to `result`.")
+                    else:
+                        errors.append(f"Disallowed call `{node.func.id}(...)`.")
+                elif node.func.id == "Matrix":
+                    msg = _HALLUCINATED_CQ_ATTRS["Matrix"]
+                    if msg not in errors:
+                        errors.append(msg)
             elif isinstance(node.func, ast.Attribute):
                 attr = node.func.attr
                 if attr in _HALLUCINATED_METHODS:
                     errors.append(_HALLUCINATED_METHODS[attr])
+                if attr == "box":
+                    for kw in node.keywords:
+                        if kw.arg == "corner":
+                            errors.append(
+                                "`.box()` has no `corner=` argument; use `centered=(False, False, False)` and `.translate((x0, y0, z0))`."
+                            )
                 if attr in {"hole", "cboreHole", "cskHole"}:
                     for kw in node.keywords:
                         if kw.arg == "through":

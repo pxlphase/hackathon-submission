@@ -78,7 +78,7 @@ try:
             "ok": False,
             "error": (
                 f"Expected exactly 1 Solid, produced {n_solids} solids.{detail_msg}\n"
-                "Check overlaps / fuse disconnected ribs or tabs into one connected solid."
+                "Check overlaps / fuse disconnected ribs or tabs into one connected solid (overlap >= 0.5 mm across shared interfaces)."
             ),
             "traceback": "",
         }))
@@ -224,5 +224,11 @@ def execute_cadquery_script(
             err += "\nHint: cq.Solid/cq.Shape objects use .Solids() (not .vals()/.val()); keep working on cq.Workplane until export."
         elif any(f"attribute '{m}'" in err for m in ("faces", "edges", "hole", "cboreHole", "cskHole", "cutBlind", "cutThruAll", "workplane")):
             err += "\nHint: wrap raw cq.Solid/cq.Shape in cq.Workplane('XY').newObject([solid]) before selecting faces or cutting Workplane features."
+    elif "at least one solid on the stack" in err:
+        err += "\nHint: the Workplane passed into `.union(other)` has no solid on its stack (make sure `other` was extruded/revolved into a 3D solid, not just a 2D wire or selector)."
+    elif "Cannot find a solid on the stack" in err:
+        err += "\nHint: a standalone `cq.Workplane(cq.Plane(...))` has no base solid to cut. Extrude a solid cutter with `.extrude(L * 0.5, both=True)` and call `result = result.cut(cutter)`, or select a face on `result` first."
+    elif "'Matrix' object" in err or "Matrix." in err or "_rotate" in err:
+        err += "\nHint: Do NOT use `cq.Matrix().rotate()` or `._rotate()`; use `cq.Workplane(cq.Plane(origin=..., normal=...))`, `.rotate(p1, p2, angle_deg)`, or `.transformed(rotate=(rx, ry, rz))`."
 
     return ExecutionResult(ok=False, step_path=None, error=err, traceback_text=tb)

@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from agentic_cad.cadquery_ref import CADQUERY_CHEATSHEET
@@ -162,6 +163,102 @@ def format_facts_brief(facts: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def _erode_1px(mask: np.ndarray) -> np.ndarray:
+    """Trim 1-px outer stroke on high-res orthographic renders so mm spans reflect geometry."""
+    if min(mask.shape) < 256 or int(mask.sum()) < 200:
+        return mask
+    p = np.pad(mask, 1, mode="constant", constant_values=False)
+    h, w = mask.shape
+    eroded = (
+        p[1 : h + 1, 1 : w + 1]
+        & p[0:h, 1 : w + 1]
+        & p[2 : h + 2, 1 : w + 1]
+        & p[1 : h + 1, 0:w]
+        & p[1 : h + 1, 2 : w + 2]
+    )
+    return eroded if int(eroded.sum()) >= 50 else mask
+
+
+def _extract_ortho_envelope_profiles(views: list[Path], facts: dict[str, Any] | None) -> str:
+    """Sample 7 orthographic silhouette stations in canonical [0..X, 0..Y, 0..Z] mm coordinates."""
+    if not facts or not views:
+        return ""
+    bbox = facts.get("bounding_box_mm", {})
+    try:
+        X = float(bbox.get("x") or 0.0)
+        Y = float(bbox.get("y") or 0.0)
+        Z = float(bbox.get("z") or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if min(X, Y, Z) <= 0.1:
+        return ""
+
+    vmap = {p.stem: p for p in views}
+    # Camera orientations match VIEW_CAMERAS:
+    # view_1_back has right=-X, up=+Z -> horizontal flip matches view_0_front
+    # view_2_left has right=-Y, up=+Z -> horizontal flip matches view_3_right
+    # view_5_bottom has right=+X, up=-Y -> vertical flip matches view_4_top
+    specs = [
+        ("Front XZ", "view_0_front", False, "view_1_back", True, False, "Z", Z, "X", X),
+        ("Right YZ", "view_3_right", False, "view_2_left", True, False, "Z", Z, "Y", Y),
+        ("Top XY", "view_4_top", False, "view_5_bottom", False, True, "Y", Y, "X", X),
+    ]
+    stations = (0.05, 0.20, 0.35, 0.50, 0.65, 0.80, 0.95)
+    lines: list[str] = []
+
+    for label, p_name, p_fh, f_name, f_fh, f_fv, v_ax, v_len, h_ax, h_len in specs:
+        vp = vmap.get(p_name)
+        fh, fv = p_fh, False
+        if vp is None:
+            vp = vmap.get(f_name)
+            fh, fv = f_fh, f_fv
+        if vp is None or not vp.is_file():
+            continue
+        try:
+            rgb = np.asarray(Image.open(vp).convert("RGB"))
+        except Exception:
+            continue
+        mask = _erode_1px(np.any(rgb < 245, axis=-1))
+        if fh:
+            mask = mask[:, ::-1]
+        if fv:
+            mask = mask[::-1, :]
+        ys, xs = np.where(mask)
+        if len(xs) == 0:
+            continue
+        crop = mask[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1]
+        H, W = crop.shape
+        min_gap_px = max(4, int(0.03 * W))
+        denom = max(1, W - 1)
+        entries: list[str] = []
+        for s in stations:
+            r = min(H - 1, max(0, int(round((1.0 - s) * (H - 1)))))
+            cols = np.where(crop[r, :])[0]
+            v_mm = s * v_len
+            if len(cols) == 0:
+                entries.append(f"{v_ax}={v_mm:.1f}->empty")
+                continue
+            breaks = np.where(np.diff(cols) > min_gap_px)[0]
+            starts = np.r_[cols[0], cols[breaks + 1]]
+            ends = np.r_[cols[breaks], cols[-1]]
+            runs = list(zip(starts.tolist(), ends.tolist()))
+            if len(runs) <= 3:
+                span = "+".join(f"[{a / denom * h_len:.1f}..{b / denom * h_len:.1f}]" for a, b in runs)
+                entries.append(f"{v_ax}={v_mm:.1f}->{h_ax}{span}")
+            else:
+                lo = (int(cols[0]) / denom) * h_len
+                hi = (int(cols[-1]) / denom) * h_len
+                entries.append(f"{v_ax}={v_mm:.1f}->{h_ax}[{lo:.1f}..{hi:.1f}]")
+        lines.append(f"  * {label}: " + "; ".join(entries))
+
+    if not lines:
+        return ""
+    return (
+        "### Orthographic Silhouette Outer Envelopes (measured from views in `[0..X, 0..Y, 0..Z]` mm):\n"
+        + "\n".join(lines)
+    )
+
+
 def build_initial_user_content(
     case_name: str,
     description: str,
@@ -173,10 +270,12 @@ def build_initial_user_content(
 ) -> list[dict[str, Any]]:
     """Construct the prefix-cacheable Turn-0 multimodal user message."""
     facts_text = format_facts_brief(facts)
+    ortho_text = _extract_ortho_envelope_profiles(views, facts)
+    ortho_section = f"\n\n{ortho_text}" if ortho_text else ""
     text_block = (
         f"## Component: {case_name}\n\n"
         f"### Engineering Design Brief (`description.md`)\n{description.strip()}\n\n"
-        f"{facts_text}\n\n"
+        f"{facts_text}{ortho_section}\n\n"
         f"### Instructions\n"
         f"Inspect all 8 orthographic/isometric views in the two contact sheets below, verify every "
         f"position in `[0..X, 0..Y, 0..Z]`, and write a clean CadQuery script that assigns the "

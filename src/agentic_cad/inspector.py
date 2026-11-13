@@ -178,7 +178,7 @@ def _merge_collinear_cylinders(items: list[CylinderFeature]) -> list[CylinderFea
             )
             if dot < 0.995:
                 continue
-            # Perpendicular distance between line and existing centre
+            # Perpendicular and axial distance between lines
             vx = item.centre[0] - existing.centre[0]
             vy = item.centre[1] - existing.centre[1]
             vz = item.centre[2] - existing.centre[2]
@@ -187,7 +187,8 @@ def _merge_collinear_cylinders(items: list[CylinderFeature]) -> list[CylinderFea
             py = vy - proj * existing.axis[1]
             pz = vz - proj * existing.axis[2]
             perp_dist = math.sqrt(px * px + py * py + pz * pz)
-            if perp_dist <= 0.15 and existing.span_deg + item.span_deg <= 365.0:
+            max_axial = 0.5 * (existing.length + item.length) + 0.5
+            if perp_dist <= 0.15 and abs(proj) <= max_axial and existing.span_deg + item.span_deg <= 370.0:
                 existing.span_deg = min(360.0, existing.span_deg + item.span_deg)
                 existing.length = max(existing.length, item.length)
                 matched = True
@@ -258,7 +259,7 @@ def inspect_shape(shape: TopoDS_Shape) -> CadTelemetry:
             u1, u2 = adaptor.FirstUParameter(), adaptor.LastUParameter()
             v1, v2 = adaptor.FirstVParameter(), adaptor.LastVParameter()
             span_deg = math.degrees(abs(u2 - u1))
-            if span_deg >= 175.0:
+            if span_deg >= 30.0:
                 u_mid = 0.5 * (u1 + u2)
                 v_mid = 0.5 * (v1 + v2)
                 pnt = gp_Pnt()
@@ -290,8 +291,8 @@ def inspect_shape(shape: TopoDS_Shape) -> CadTelemetry:
                 )
 
     merged_cyls = _merge_collinear_cylinders(raw_cyls)
-    holes = [c for c in merged_cyls if c.kind == "hole" and c.span_deg >= 350.0]
-    bosses = [c for c in merged_cyls if c.kind == "boss" and c.span_deg >= 350.0]
+    holes = [c for c in merged_cyls if c.kind == "hole" and c.span_deg >= 270.0]
+    bosses = [c for c in merged_cyls if c.kind == "boss" and c.span_deg >= 270.0]
 
     chi = vertices - (edges - deg_edges) + faces - extra_wires
     genus = max(0, (2 * shells - chi) // 2) if shells > 0 else 0

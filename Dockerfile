@@ -41,7 +41,8 @@ ENV CAD_GLOBAL_TIMEOUT_S=3300 \
     CAD_LLM_TIMEOUT_S=300 \
     CAD_MAX_WORKERS=3 \
     CAD_IOU_EARLY_EXIT=0.95 \
-    CAD_THINKING=auto
+    CAD_THINKING=auto \
+    CAD_REASONING_EFFORT=auto
 
 # ENV OPENAI_BASE_URL=http://<your Brev instance>:8000/v1 \
 #     OPENAI_API_KEY=<your vLLM --api-key> \

@@ -141,6 +141,10 @@ result = cq.Workplane("XY").box(20, 10, 5, centered=(False, False, False))
     assert any(".rLineTo()" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').moveTo(0, 0).rLineTo(10, 0).close().extrude(5)"))
     assert any(".rotateZ()" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(1, 2, 3).rotateZ(45)"))
     assert any("ONE 3-tuple" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(1, 2, 3).translate(1, 2, 3)"))
+    assert any("Matrix" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(1, 2, 3)\nm = cq.Matrix().rotate(1, 2, 3)"))
+    assert any("Matrix" in e for e in validate_cadquery_ast("import cadquery as cq\nfrom cadquery import Matrix\nresult = Matrix()"))
+    assert any("_rotate" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(1, 1, 1)\nx = m._rotate((0,0,1), 45)"))
+    assert any("corner=" in e for e in validate_cadquery_ast("import cadquery as cq\nresult = cq.Workplane('XY').box(1, 2, 3, corner=(0, 0, 0))"))
     assert any("Missing assignment to `result`" in e for e in validate_cadquery_ast("import cadquery as cq\npart = cq.Workplane('XY').box(1, 1, 1)"))
 
 
@@ -174,6 +178,25 @@ result = a.vals()[0]
     res_sv = execute_cadquery_script(solid_vals_code, tmp_path / "sv.stp")
     assert not res_sv.ok
     assert ".Solids()" in res_sv.error
+
+    empty_cut_code = """
+import cadquery as cq
+base = cq.Workplane("XY").box(10, 10, 10)
+result = cq.Workplane(cq.Plane(origin=(0, 0, 0), normal=(0, 0, 1))).circle(2).cutThruAll()
+"""
+    res_ec = execute_cadquery_script(empty_cut_code, tmp_path / "ec.stp")
+    assert not res_ec.ok
+    assert "extrude(L * 0.5, both=True)" in res_ec.error
+
+    empty_union_code = """
+import cadquery as cq
+base = cq.Workplane("XY").box(10, 10, 10)
+unextruded_sketch = cq.Workplane("XY").circle(3)
+result = base.union(unextruded_sketch)
+"""
+    res_eu = execute_cadquery_script(empty_union_code, tmp_path / "eu.stp")
+    assert not res_eu.ok
+    assert "extruded/revolved into a 3D solid" in res_eu.error
 
     multi_code = """
 import cadquery as cq
@@ -572,13 +595,21 @@ result = cq.Workplane("XY").box(5.0, 5.0, 5.0, centered=(False, False, False))
 
     e_client = _EffortRejectClient()
     agent6 = QwenCadAgent(config=cfg, client=e_client)
-    assert agent6._plan_budget({"faces": 150})[0] == "medium"
-    assert agent6._plan_budget({"faces": 350})[0] == "medium"
+    assert agent6._plan_budget({"faces": 20})[0] == "medium"
+    assert agent6._plan_budget({"faces": 150})[0] == "low"
+    assert agent6._plan_budget({"faces": 350})[0] == "low"
+    agent6_med = QwenCadAgent(config=_test_config(reasoning_effort="medium"), client=e_client)
+    assert agent6_med._plan_budget({"faces": 350})[0] == "medium"
     reply6 = agent6._call_llm([{"role": "user", "content": "hi"}], reasoning_effort="high", timeout_s=30.0)
     assert "box(40.0, 30.0, 10.0" in reply6
     assert e_client.calls[1].get("reasoning_effort") == "medium"
+    # Verify max_tokens caps for low vs none
+    agent6._call_llm([{"role": "user", "content": "hi"}], reasoning_effort="low", timeout_s=30.0)
+    assert e_client.calls[-1]["max_tokens"] <= 10240
+    agent6._call_llm([{"role": "user", "content": "hi"}], reasoning_effort="none", timeout_s=30.0)
+    assert e_client.calls[-1]["max_tokens"] <= 8192
 
-    # 7. Timeout rescue on Turn 0 -> retries fast non-thinking pass (enable_thinking=False) + Turn 1 uses medium
+    # 7a. Timeout rescue on complex part (starts "low") -> retries "none" and steps down Turn 1 to "none" (enable_thinking=False)
     from openai import APITimeoutError
 
     class _FakeTimeout(APITimeoutError):
@@ -611,12 +642,25 @@ result = cq.Workplane("XY").box(5.0, 5.0, 5.0, centered=(False, False, False))
     s7 = agent7.generate_cad("Complex plate", views, None, out7, facts=complex_facts, case_name="case_to")
     assert not s7.used_fallback
     assert s7.turns_used == 2
-    assert to_client.calls[0].get("reasoning_effort") == "medium"
+    assert to_client.calls[0].get("reasoning_effort") == "low"
     assert "reasoning_effort" not in to_client.calls[1]
     assert to_client.calls[1].get("extra_body", {}).get("chat_template_kwargs", {}).get("enable_thinking") is False
-    assert to_client.calls[2].get("reasoning_effort") == "medium"
+    assert "reasoning_effort" not in to_client.calls[2]
+    assert to_client.calls[2].get("extra_body", {}).get("chat_template_kwargs", {}).get("enable_thinking") is False
     assert inspect_step_file(out7).through_holes_genus == 1
     assert not list(tmp_path.glob(".tmp_*"))
+
+    # 7b. Timeout rescue on simple part (starts "medium") -> retries "none" and steps down Turn 1 to "low"
+    to_client_med = _TimeoutThenRepairClient()
+    simple_facts = dict(facts, faces=15)
+    agent7b = QwenCadAgent(config=cfg, client=to_client_med)
+    out7b = tmp_path / "timeout_rescue_med.stp"
+    s7b = agent7b.generate_cad("Simple plate", views, None, out7b, facts=simple_facts, case_name="case_to_med")
+    assert not s7b.used_fallback
+    assert s7b.turns_used == 2
+    assert to_client_med.calls[0].get("reasoning_effort") == "medium"
+    assert to_client_med.calls[1].get("extra_body", {}).get("chat_template_kwargs", {}).get("enable_thinking") is False
+    assert to_client_med.calls[2].get("reasoning_effort") == "low"
 
     # 8. Stagnation plateau warning & early exit before burning all turns + Turn 2 drops effort to low
     cfg8 = _test_config(iou_early_exit=0.999, max_turns_simple=5)
@@ -636,6 +680,99 @@ def test_submission_solid_check_rejects_mock_text(tmp_path):
     fake_stp.write_text("this is mock step content", encoding="utf-8")
     with pytest.raises(ValueError, match="STEP File could not be loaded"):
         cq.importers.importStep(str(fake_stp))
+
+
+def test_inspector_collinear_cylinder_merge_and_separation():
+    from agentic_cad.inspector import CylinderFeature, _merge_collinear_cylinders
+
+    # Four 90-degree seam-split segments of one single bore -> merge into 1 full 360-deg feature
+    quad_segs = [
+        CylinderFeature(kind="hole", diameter=10.0, axis=(0.0, 0.0, 1.0), centre=(25.0, 25.0, 5.0), length=10.0, span_deg=90.0)
+        for _ in range(4)
+    ]
+    merged_quad = _merge_collinear_cylinders(quad_segs)
+    assert len(merged_quad) == 1
+    assert merged_quad[0].span_deg == 360.0
+
+    # Two separated collinear bores along Z (at Z=5 and Z=35, lengths=8) must stay distinct
+    sep_bores = [
+        CylinderFeature(kind="hole", diameter=10.0, axis=(0.0, 0.0, 1.0), centre=(25.0, 25.0, 5.0), length=8.0, span_deg=180.0),
+        CylinderFeature(kind="hole", diameter=10.0, axis=(0.0, 0.0, 1.0), centre=(25.0, 25.0, 5.0), length=8.0, span_deg=180.0),
+        CylinderFeature(kind="hole", diameter=10.0, axis=(0.0, 0.0, 1.0), centre=(25.0, 25.0, 35.0), length=8.0, span_deg=180.0),
+        CylinderFeature(kind="hole", diameter=10.0, axis=(0.0, 0.0, 1.0), centre=(25.0, 25.0, 35.0), length=8.0, span_deg=180.0),
+    ]
+    merged_sep = _merge_collinear_cylinders(sep_bores)
+    assert len(merged_sep) == 2
+    assert all(m.span_deg == 360.0 for m in merged_sep)
+
+
+def test_fallback_revolve_candidate_stepped_shaft_cone(tmp_path):
+    # Axisymmetric stepped shaft + cone aligned along Z inside [0..40, 0..40, 0..60]
+    plane = cq.Plane(origin=(20.0, 20.0, 0.0), xDir=(1.0, 0.0, 0.0), normal=(0.0, -1.0, 0.0))
+    pts = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (10.0, 35.0), (10.0, 60.0), (0.0, 60.0)]
+    solid = cq.Workplane(plane).polyline(pts).close().revolve(360.0, (0.0, 0.0), (0.0, 1.0)).val()
+    tel_tgt = inspect_shape(solid.wrapped)
+    diag = (40.0**2 + 40.0**2 + 60.0**2) ** 0.5
+    mesh = tessellate_shape(solid.wrapped, diag_mm=diag)
+    views: list[Path] = []
+    for name in VIEW_CAMERAS:
+        p = tmp_path / f"{name}.png"
+        render_view(mesh, name, size=256).image.save(p)
+        views.append(p)
+    facts = {
+        "solids": 1,
+        "faces": tel_tgt.faces,
+        "edges": tel_tgt.edges,
+        "through_holes_genus": 0,
+        "bounding_box_mm": tel_tgt.bounding_box_mm,
+        "volume_mm3": tel_tgt.volume_mm3,
+        "surface_area_mm2": tel_tgt.surface_area_mm2,
+    }
+    out_stp = tmp_path / "rev_fb.stp"
+    assert generate_fallback_step(views, facts, out_stp)
+    tel_fb = inspect_step_file(out_stp)
+    assert tel_fb.is_valid and tel_fb.solids == 1 and tel_fb.shells == 1
+    assert tel_fb.face_types.get("CONE", 0) > 0 or tel_fb.face_types.get("CYLINDER", 0) > 0
+    sh_fb = load_step_shape(out_stp)
+    ve = evaluate_views(tessellate_shape(sh_fb, diag_mm=diag), views, eval_size=192)
+    assert ve.mean_silhouette_iou > 0.90
+
+
+def test_prompts_ortho_envelope_profiles(tmp_path):
+    from agentic_cad.prompts import _extract_ortho_envelope_profiles
+
+    # facts=None -> no ortho envelope section appended
+    tc5_dir = REPO_ROOT / "artifacts/inputs/test_case_5"
+    tc5_views = sorted((tc5_dir / "images").glob("view_*.png"))
+    tc5_facts = json.loads((tc5_dir / "facts.json").read_text(encoding="utf-8"))
+    u_nofacts = build_initial_user_content("p", "desc", None, tc5_views, None, tile_px=256)
+    assert "Orthographic Silhouette Outer Envelopes" not in u_nofacts[0]["text"]
+
+    # On test_case_5, Right YZ reveals main body Y[22.3..85.7] vs top projecting tabs Y[0.0..85.7]
+    u_tc5 = build_initial_user_content("tc5", "desc", tc5_facts, tc5_views, None, tile_px=256)
+    txt = u_tc5[0]["text"]
+    assert "Orthographic Silhouette Outer Envelopes" in txt
+    assert "Front XZ:" in txt and "Right YZ:" in txt and "Top XY:" in txt
+    assert "Y[22." in txt and "Y[0.0..85." in txt
+
+    # Synthetic L-shape test using fallback view_5_bottom (tests vertical flip in VIEW_CAMERAS)
+    l_shape = (
+        cq.Workplane("XY")
+        .box(60.0, 40.0, 10.0, centered=(False, False, False))
+        .union(cq.Workplane("XY").box(60.0, 15.0, 10.0, centered=(False, False, False)).translate((0.0, 25.0, 10.0)))
+    )
+    solid = l_shape.val().wrapped
+    tel = inspect_shape(solid)
+    mesh = tessellate_shape(solid, diag_mm=80.0)
+    bot_path = tmp_path / "view_5_bottom.png"
+    front_path = tmp_path / "view_0_front.png"
+    render_view(mesh, "view_5_bottom", size=256).image.save(bot_path)
+    render_view(mesh, "view_0_front", size=256).image.save(front_path)
+    # Narrow tab sits at Y=[25..40], i.e., large Y, while bottom base spans X=[0..60]
+    syn_facts = {"bounding_box_mm": tel.bounding_box_mm}
+    prof = _extract_ortho_envelope_profiles([front_path, bot_path], syn_facts)
+    assert "Top XY:" in prof
+    assert "Y=2.0->X[0.0..60.0]" in prof
 
 
 def test_cli_main_worker_execution_and_strict_output_filenames(tmp_path, monkeypatch):
@@ -702,4 +839,3 @@ result = (
     assert (render_dir / "test_case_1_diff.png").is_file()
     assert (stl_dir / "test_case_1.stl").stat().st_size > 100
     assert not (stl_dir / "test_case_2.stl").exists()
-

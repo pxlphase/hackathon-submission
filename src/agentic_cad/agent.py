@@ -56,10 +56,11 @@ def _prefer_llm_over_floor(
         and floor_diff is not None
         and best_ve is not None
         and best_diff.genus_diff == 0
-        and best_diff.max_bbox_err_pct <= 2.0
+        and best_diff.max_bbox_err_pct <= 2.5
         and best_ve.mean_silhouette_iou >= 0.80
-        and abs(best_diff.vol_err_pct) < 0.4 * abs(floor_diff.vol_err_pct)
-        and best_score.total >= floor_score.total - 0.05
+        and abs(floor_diff.vol_err_pct) >= 8.0
+        and abs(best_diff.vol_err_pct) < 0.5 * abs(floor_diff.vol_err_pct)
+        and best_score.total >= floor_score.total - 0.10
     )
 
 
@@ -87,13 +88,20 @@ class QwenCadAgent:
         )
 
     def _plan_budget(self, facts: dict[str, Any] | None) -> tuple[str, int]:
-        """Choose reasoning effort and max repair turns from BRep face complexity (no per-part timer)."""
+        """Choose reasoning effort and max repair turns from BRep face complexity and config."""
         faces = int((facts or {}).get("faces") or 50)
         if faces <= 30:
-            return "medium", self.config.max_turns_simple
-        if faces <= 200:
-            return "medium", self.config.max_turns_medium
-        return "medium", self.config.max_turns_complex
+            turns = self.config.max_turns_simple
+            auto_effort = "medium"
+        elif faces <= 200:
+            turns = self.config.max_turns_medium
+            auto_effort = "low"
+        else:
+            turns = self.config.max_turns_complex
+            auto_effort = "low"
+        cfg_eff = (self.config.reasoning_effort or "auto").strip().lower()
+        effort = cfg_eff if cfg_eff in ("low", "medium", "none") else auto_effort
+        return effort, turns
 
     def _call_llm(
         self,
@@ -105,7 +113,9 @@ class QwenCadAgent:
         max_tok = self.config.max_tokens
         if len(messages) > 2:
             max_tok = min(max_tok, 12288)
-        if reasoning_effort in ("low", "none"):
+        if reasoning_effort == "low":
+            max_tok = min(max_tok, 10240)
+        elif reasoning_effort == "none":
             max_tok = min(max_tok, 8192)
         kwargs: dict[str, Any] = {
             "model": self.config.openai_model,
@@ -297,17 +307,19 @@ class QwenCadAgent:
                         diff_composite_png=last_diff_png,
                     )
 
-                if turn == 0:
+                if effort == "none":
+                    turn_effort = "none"
+                elif turn == 0:
                     turn_effort = effort
                 elif turn >= 2 and not prev_exec_failed:
-                    turn_effort = "low"
+                    turn_effort = "none" if effort == "low" else "low"
                 else:
                     turn_effort = "medium" if effort == "xhigh" else effort
 
                 if remaining is not None:
                     if remaining < 60.0:
                         turn_effort = "none"
-                    elif remaining < 180.0:
+                    elif remaining < 180.0 and turn_effort != "none":
                         turn_effort = "low"
 
                 call_timeout = self.config.llm_timeout_s
@@ -317,13 +329,18 @@ class QwenCadAgent:
                 try:
                     raw_reply = self._call_llm(messages, reasoning_effort=turn_effort, timeout_s=call_timeout)
                 except (APITimeoutError, TimeoutError) as exc:
+                    if turn_effort == "medium":
+                        effort = "low"
+                    elif turn_effort == "low":
+                        effort = "none"
                     rem_after = (global_deadline - time.monotonic()) if global_deadline is not None else 160.0
                     if turn_effort != "none" and self.config.thinking_mode != "off" and rem_after >= 30.0:
                         logger.warning(
-                            "[%s] turn %d timed out (%s); retrying instant non-thinking pass.",
+                            "[%s] turn %d timed out (%s); retrying instant non-thinking pass (next effort=%s).",
                             name,
                             turn,
                             exc,
+                            effort,
                         )
                         try:
                             raw_reply = self._call_llm(

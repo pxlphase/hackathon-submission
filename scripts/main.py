@@ -96,11 +96,10 @@ def main(args: argparse.Namespace) -> None:
 
     global_deadline = t0 + cfg.global_timeout_s
     agent = QwenCadAgent(config=cfg)
-    # Schedule highest face-count parts first so complex parts never sit tail-end in the worker queue
+    # Schedule simplest parts first so fast high-scoring parts finish upfront instead of starving at deadline
     ordered_cases = sorted(
         test_cases,
         key=lambda tc: int((tc.facts or {}).get("faces") or 50),
-        reverse=True,
     )
     workers = min(cfg.max_workers, len(ordered_cases))
     logger.info(
