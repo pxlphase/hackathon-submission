@@ -673,3 +673,33 @@ result = (
     for p in out_dir.iterdir():
         tel = inspect_step_file(p)
         assert tel.is_valid and tel.solids == 1
+
+    # Also verify inspect_outputs script writes diff PNGs and STL meshes cleanly
+    import scripts.inspect_outputs as inspect_cli
+
+    render_dir = tmp_path / "renders"
+    stl_dir = tmp_path / "stls"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "inspect_outputs.py",
+            "--input_dir",
+            str(in_dir),
+            "--output_dir",
+            str(out_dir),
+            "--render_dir",
+            str(render_dir),
+            "--stl_dir",
+            str(stl_dir),
+            "--eval_px",
+            "192",
+            "--cases",
+            "1",
+        ],
+    )
+    inspect_cli.main()
+    assert (render_dir / "test_case_1_diff.png").is_file()
+    assert (stl_dir / "test_case_1.stl").stat().st_size > 100
+    assert not (stl_dir / "test_case_2.stl").exists()
+
