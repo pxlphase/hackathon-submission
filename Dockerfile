@@ -37,15 +37,18 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Non-secret agent runtime defaults (README: Configuration).
 # Endpoint credentials are injected via <team>.env at code freeze, or set here for dev builds.
-ENV CAD_GLOBAL_TIMEOUT_S=3300 \
-    CAD_LLM_TIMEOUT_S=300 \
+ENV CAD_GLOBAL_TIMEOUT_S=1140 \
+    CAD_LLM_TIMEOUT_S=180 \
     CAD_MAX_WORKERS=3 \
+    CAD_TOOLS=1 \
+    CAD_MAX_TOOL_STEPS=3 \
+    CAD_BEST_OF_K=2 \
     CAD_IOU_EARLY_EXIT=0.95 \
     CAD_THINKING=auto \
     CAD_REASONING_EFFORT=auto
 
 # ENV OPENAI_BASE_URL=http://<your Brev instance>:8000/v1 \
 #     OPENAI_API_KEY=<your vLLM --api-key> \
-#     OPENAI_MODEL=Qwen/Qwen3.8-27B
+#     OPENAI_MODEL=Qwen/Qwen3.8-27B-FP8
 
 CMD ["python", "scripts/main.py"]

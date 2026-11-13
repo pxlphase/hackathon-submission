@@ -46,6 +46,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     """Configuration for the Qwen3.8-27B CAD generation & verification pipeline."""
@@ -54,15 +65,20 @@ class HarnessConfig:
     openai_api_key: str
     openai_model: str
     max_workers: int = 3
-    global_timeout_s: float = 3300.0
+    global_timeout_s: float = 1140.0
     exec_timeout_s: float = 45.0
-    llm_timeout_s: float = 300.0
+    llm_timeout_s: float = 180.0
     max_tokens: int = 16384
     temperature: float = 0.8
     top_p: float = 0.95
     seed: int = 42
     thinking_mode: str = "auto"  # "auto" | "on" | "off"
     reasoning_effort: str = "auto"  # "auto" | "low" | "medium" | "none"
+
+    # Interactive VLM/CAD inspection tools & parallel Turn-0 candidate selection
+    enable_tools: bool = True
+    max_tool_steps: int = 3
+    best_of_k: int = 2
 
     # Convergence & Tier-1/Tier-2 thresholds
     iou_early_exit: float = 0.95
@@ -90,18 +106,21 @@ class HarnessConfig:
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1").strip()
             or "http://localhost:8000/v1",
             openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip() or "EMPTY",
-            openai_model=os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.8-27B").strip()
-            or "Qwen/Qwen3.8-27B",
+            openai_model=os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.8-27B-FP8").strip()
+            or "Qwen/Qwen3.8-27B-FP8",
             max_workers=max(1, _env_int("CAD_MAX_WORKERS", 3)),
-            global_timeout_s=max(60.0, _env_float("CAD_GLOBAL_TIMEOUT_S", 3300.0)),
+            global_timeout_s=max(60.0, _env_float("CAD_GLOBAL_TIMEOUT_S", 1140.0)),
             exec_timeout_s=max(10.0, _env_float("CAD_EXEC_TIMEOUT_S", 45.0)),
-            llm_timeout_s=max(30.0, _env_float("CAD_LLM_TIMEOUT_S", 300.0)),
+            llm_timeout_s=max(30.0, _env_float("CAD_LLM_TIMEOUT_S", 180.0)),
             max_tokens=max(2048, _env_int("CAD_MAX_TOKENS", 16384)),
             temperature=_env_float("CAD_TEMPERATURE", 0.8),
             top_p=_env_float("CAD_TOP_P", 0.95),
             seed=_env_int("CAD_SEED", 42),
             thinking_mode=os.environ.get("CAD_THINKING", "auto").strip().lower() or "auto",
             reasoning_effort=os.environ.get("CAD_REASONING_EFFORT", "auto").strip().lower() or "auto",
+            enable_tools=_env_bool("CAD_TOOLS", True),
+            max_tool_steps=max(0, min(6, _env_int("CAD_MAX_TOOL_STEPS", 3))),
+            best_of_k=max(1, min(4, _env_int("CAD_BEST_OF_K", 2))),
             iou_early_exit=_env_float("CAD_IOU_EARLY_EXIT", 0.95),
             vol_tol_pct=_env_float("CAD_VOL_TOL_PCT", 2.0),
             area_tol_pct=_env_float("CAD_AREA_TOL_PCT", 3.0),

@@ -267,15 +267,41 @@ def build_initial_user_content(
     context: Path | None,
     tile_px: int = 512,
     context_px: int = 512,
+    enable_tools: bool = False,
 ) -> list[dict[str, Any]]:
     """Construct the prefix-cacheable Turn-0 multimodal user message."""
+    from agentic_cad.tools import summarize_ortho_key_features
+
     facts_text = format_facts_brief(facts)
     ortho_text = _extract_ortho_envelope_profiles(views, facts)
-    ortho_section = f"\n\n{ortho_text}" if ortho_text else ""
+    key_feats_text = ""
+    try:
+        key_feats_text = summarize_ortho_key_features(views, facts)
+    except Exception:
+        key_feats_text = ""
+
+    extra_sections = ""
+    if ortho_text:
+        extra_sections += f"\n\n{ortho_text}"
+    if key_feats_text:
+        extra_sections += f"\n\n{key_feats_text}"
+
+    tool_section = ""
+    if enable_tools:
+        tool_section = (
+            "\n\n### Optional Inspection & Probing Tools\n"
+            "You have access to 3 tools if needed before outputting your final script:\n"
+            "- `measure_ortho_features(view, detail)`: extracts full canonical outer/hole vertices and internal creases.\n"
+            "- `zoom_view_crop(view, h_min, v_min, h_max, v_max)`: zooms native 1024px views with mm axis rulers.\n"
+            "- `cad_probe(code)`: runs CadQuery safely and returns volume, bbox, missing features, and 8-view IoU.\n"
+            "For straightforward parts, write the script directly or run one `cad_probe`; for complex/angled shapes, "
+            "measure or zoom ambiguities first, probe cleanly, and finish with one ```python ... ``` block assigning `result`."
+        )
+
     text_block = (
         f"## Component: {case_name}\n\n"
         f"### Engineering Design Brief (`description.md`)\n{description.strip()}\n\n"
-        f"{facts_text}{ortho_section}\n\n"
+        f"{facts_text}{extra_sections}{tool_section}\n\n"
         f"### Instructions\n"
         f"Inspect all 8 orthographic/isometric views in the two contact sheets below, verify every "
         f"position in `[0..X, 0..Y, 0..Z]`, and write a clean CadQuery script that assigns the "
@@ -312,8 +338,14 @@ def build_repair_messages(
     last_code: str,
     diagnostic_report: str,
     diff_composite_png: bytes | None = None,
+    enable_tools: bool = False,
 ) -> list[dict[str, Any]]:
     """Keep System + Initial User prefix identical across turns for vLLM KV prefix-cache reuse."""
+    tool_hint = (
+        " You may inspect discrepancies with `zoom_view_crop` / `measure_ortho_features` or verify a fix via `cad_probe` before answering."
+        if enable_tools
+        else ""
+    )
     repair_content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -321,7 +353,7 @@ def build_repair_messages(
                 "### Automated Verification & Repair Feedback\n"
                 f"{diagnostic_report.strip()}\n\n"
                 "Fix ONLY the discrepancies identified above while keeping accurate dimensions/features intact. "
-                "Verify coordinate axes, workplane normals, hole diameters/centres, and boolean cut directions. "
+                f"Verify coordinate axes, workplane normals, hole diameters/centres, and boolean cut directions.{tool_hint} "
                 "Output the complete corrected CadQuery Python script assigning the final solid to `result`."
             ),
         }

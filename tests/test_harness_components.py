@@ -63,11 +63,13 @@ def _test_config(**overrides) -> HarnessConfig:
     base = dict(
         openai_base_url="http://localhost:8000/v1",
         openai_api_key="test-key",
-        openai_model="Qwen/Qwen3.8-27B",
+        openai_model="Qwen/Qwen3.8-27B-FP8",
         max_workers=2,
         global_timeout_s=120.0,
         exec_timeout_s=20.0,
         llm_timeout_s=30.0,
+        enable_tools=False,
+        best_of_k=1,
         contact_tile_px=256,
         context_max_px=256,
         diff_tile_px=192,
@@ -103,13 +105,20 @@ def test_config_from_env_and_dotenv(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "pre-existing-wins")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("CAD_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("CAD_GLOBAL_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("CAD_TOOLS", raising=False)
+    monkeypatch.delenv("CAD_BEST_OF_K", raising=False)
 
     load_dotenv_if_present(env_file)
     cfg = HarnessConfig.from_env(load_dotenv=False)
     assert cfg.openai_base_url == "http://10.0.0.5:8000/v1"
     assert cfg.openai_api_key == "pre-existing-wins"
     assert cfg.max_workers == 3
-    assert cfg.global_timeout_s == 3300.0
+    assert cfg.global_timeout_s == 1140.0
+    assert cfg.openai_model == "Qwen/Qwen3.8-27B-FP8"
+    assert cfg.enable_tools is True
+    assert cfg.best_of_k == 2
+    assert cfg.max_tool_steps == 3
 
 
 def test_extract_python_code_and_validate_ast():
@@ -839,3 +848,333 @@ result = (
     assert (render_dir / "test_case_1_diff.png").is_file()
     assert (stl_dir / "test_case_1.stl").stat().st_size > 100
     assert not (stl_dir / "test_case_2.stl").exists()
+
+
+def test_tools_ortho_measurement_zoom_and_cad_probe(tmp_path):
+    from agentic_cad.tools import (
+        analyze_ortho_view,
+        measure_ortho_features,
+        parse_text_tool_calls,
+        run_cad_probe,
+        zoom_view_crop,
+    )
+
+    # Asymmetric plate [0..60, 0..40, 0..14] with offset through-hole (d=12 @ X=18, Y=26)
+    # and offset blind circular pocket (d=14 @ X=44, Y=14, depth=5)
+    part = (
+        cq.Workplane("XY")
+        .box(60.0, 40.0, 14.0, centered=(False, False, False))
+        .faces(">Z")
+        .workplane(centerOption="CenterOfBoundBox")
+        .center(18.0 - 30.0, 26.0 - 20.0)
+        .hole(12.0)
+        .faces(">Z")
+        .workplane(centerOption="CenterOfBoundBox")
+        .center(44.0 - 30.0, 14.0 - 20.0)
+        .circle(7.0)
+        .cutBlind(-5.0)
+    )
+    solid = part.val().wrapped
+    tel = inspect_shape(solid)
+    diag = (60.0**2 + 40.0**2 + 14.0**2) ** 0.5
+    mesh = tessellate_shape(solid, diag_mm=diag)
+    views: list[Path] = []
+    for name in VIEW_CAMERAS:
+        p = tmp_path / f"{name}.png"
+        render_view(mesh, name, size=320).image.save(p)
+        views.append(p)
+    facts = {
+        "bounding_box_mm": tel.bounding_box_mm,
+        "volume_mm3": tel.volume_mm3,
+        "surface_area_mm2": tel.surface_area_mm2,
+        "through_holes_genus": 1,
+        "cylindrical_holes_and_bores": [
+            {"count": 1, "diameter": 12.0, "axis": "Z", "lengths": [14.0], "centres": [[18.0, 26.0, 7.0]]},
+        ],
+    }
+
+    # Check view_4_top AND flipped view_5_bottom agree in canonical [X, Y] coordinates!
+    vmap = {p.stem: p for p in views}
+    top_info = analyze_ortho_view(vmap["view_4_top"], "view_4_top", facts, detail="summary")
+    bot_info = analyze_ortho_view(vmap["view_5_bottom"], "view_5_bottom", facts, detail="summary")
+    assert len(top_info["through_openings"]) == 1
+    assert len(bot_info["through_openings"]) == 1
+    top_hole = top_info["through_openings"][0]["circle"]
+    bot_hole = bot_info["through_openings"][0]["circle"]
+    assert abs(top_hole["cx"] - 18.0) < 0.8 and abs(top_hole["cy"] - 26.0) < 0.8
+    assert abs(bot_hole["cx"] - 18.0) < 0.8 and abs(bot_hole["cy"] - 26.0) < 0.8
+    assert abs(top_hole["diameter_mm"] - 12.0) < 0.8
+
+    # Top view internal creases should catch blind pocket d=14 @ (44, 14)
+    top_txt = measure_ortho_features(views, facts, "view_4_top", detail="full")
+    assert "internal" in top_txt.lower()
+    assert any(
+        ic.get("circle") and abs(ic["circle"]["cx"] - 44.0) < 1.2 and abs(ic["circle"]["cy"] - 14.0) < 1.2
+        for ic in top_info["internal_creases"]
+    )
+
+    # Zoomed crops on ortho + iso return crisp 512x512 annotated PNG bytes
+    legend_o, png_o = zoom_view_crop(views, facts, "view_5_bottom", h_min=10.0, v_min=18.0, h_max=28.0, v_max=34.0)
+    assert png_o is not None
+    assert Image.open(io.BytesIO(png_o)).size == (512, 512)
+    assert "mm" in legend_o
+
+    legend_i, png_i = zoom_view_crop(views, facts, "view_6_iso_front_right_top", h_min=0.1, v_min=0.1, h_max=0.9, v_max=0.9)
+    assert png_i is not None
+    assert Image.open(io.BytesIO(png_i)).size == (512, 512)
+    assert "norm" in legend_i
+
+    # cad_probe succeeds on valid snippet and reports exact failure on invalid AST
+    good_probe = run_cad_probe(
+        code=(
+            "import cadquery as cq\n"
+            "result = cq.Workplane('XY').box(60.0, 40.0, 14.0, centered=(False, False, False))\n"
+        ),
+        views=views,
+        facts=facts,
+        work_dir=tmp_path,
+        probe_idx=1,
+    )
+    assert good_probe.ok and good_probe.score is not None and good_probe.step_path is not None
+    assert "cad_probe SUCCEEDED" in good_probe.report
+    bad_probe = run_cad_probe(code="import os\nresult = 1", views=views, facts=facts, work_dir=tmp_path, probe_idx=2)
+    assert not bad_probe.ok and "cad_probe FAILED" in bad_probe.report
+
+    # Real test_case_8 view_3_right identifies central 20mm bore circle
+    tc8_dir = REPO_ROOT / "artifacts/inputs/test_case_8"
+    tc8_views = sorted((tc8_dir / "images").glob("view_*.png"))
+    tc8_facts = json.loads((tc8_dir / "facts.json").read_text(encoding="utf-8"))
+    tc8_right = analyze_ortho_view({p.stem: p for p in tc8_views}["view_3_right"], "view_3_right", tc8_facts)
+    assert any(
+        "circle" in h and abs(h["circle"]["diameter_mm"] - 20.0) < 1.2
+        for h in tc8_right["through_openings"]
+    )
+
+    # XML & JSON <tool_call> fallback parsing
+    xml_raw = (
+        "Checking view first.\n<tool_call>\n<function=measure_ortho_features>\n"
+        "<parameter=view>\nview_0_front\n</parameter>\n<parameter=detail>\nfull\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    cleaned, x_calls = parse_text_tool_calls(xml_raw)
+    assert cleaned == "Checking view first."
+    assert x_calls == [
+        {"id": "xml_call_0", "name": "measure_ortho_features", "arguments": {"view": "view_0_front", "detail": "full"}}
+    ]
+
+
+def test_agent_tool_calling_and_best_of_k(tmp_path):
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    views, facts = _make_rendered_target_part(target_dir)
+
+    good_script = """```python
+import cadquery as cq
+result = (
+    cq.Workplane("XY")
+    .box(40.0, 30.0, 10.0, centered=(False, False, False))
+    .faces(">Z")
+    .workplane(centerOption="CenterOfBoundBox")
+    .hole(12.0)
+)
+```"""
+    no_hole_script = """```python
+import cadquery as cq
+result = cq.Workplane("XY").box(40.0, 30.0, 10.0, centered=(False, False, False))
+```"""
+
+    # 1. Native OpenAI tool_calls: measure + zoom -> cad_probe(no_hole) -> final good_script
+    class _NativeToolClient:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            idx = len(self.calls) - 1
+            if idx == 0:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="tool_calls",
+                            message=SimpleNamespace(
+                                content="",
+                                reasoning_content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="call_meas_1",
+                                        function=SimpleNamespace(
+                                            name="measure_ortho_features",
+                                            arguments=json.dumps({"view": "view_4_top", "detail": "summary"}),
+                                        ),
+                                    ),
+                                    SimpleNamespace(
+                                        id="call_zoom_1",
+                                        function=SimpleNamespace(
+                                            name="zoom_view_crop",
+                                            arguments=json.dumps(
+                                                {"view": "view_4_top", "h_min": 5.0, "v_min": 5.0, "h_max": 35.0, "v_max": 25.0}
+                                            ),
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        )
+                    ]
+                )
+            if idx == 1:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="tool_calls",
+                            message=SimpleNamespace(
+                                content="",
+                                reasoning_content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        id="call_probe_1",
+                                        function=SimpleNamespace(
+                                            name="cad_probe",
+                                            arguments=json.dumps({"code": no_hole_script}),
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        )
+                    ]
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=good_script, reasoning_content=None, tool_calls=None),
+                    )
+                ]
+            )
+
+    nt_client = _NativeToolClient()
+    cfg_tools = _test_config(enable_tools=True, max_tool_steps=3, best_of_k=1, iou_early_exit=0.90)
+    s_nt = QwenCadAgent(config=cfg_tools, client=nt_client).generate_cad(
+        "Plate with hole", views, None, tmp_path / "native_tools.stp", facts=facts, case_name="case_nt"
+    )
+    assert s_nt.turns_used == 1
+    assert not s_nt.used_fallback
+    assert len(nt_client.calls) == 3
+    # Call 1 received tool responses + zoomed user PNG message
+    msgs_1 = nt_client.calls[1]["messages"]
+    assert any(
+        m.get("role") == "tool"
+        and ("center=(X=19.9" in str(m.get("content")) or "center=(X=20.0" in str(m.get("content")))
+        and "dia=12." in str(m.get("content"))
+        for m in msgs_1
+    )
+    assert msgs_1[-1]["role"] == "user"
+    assert any(p.get("type") == "image_url" for p in msgs_1[-1]["content"])
+    # Call 2 received cad_probe missing-genus telemetry
+    msgs_2 = nt_client.calls[2]["messages"]
+    assert any(m.get("role") == "tool" and "cad_probe SUCCEEDED" in str(m.get("content")) for m in msgs_2)
+    assert inspect_step_file(tmp_path / "native_tools.stp").through_holes_genus == 1
+
+    # 2. cad_probe achieving early exit skips final redundant round-trip!
+    class _EarlyProbeClient:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="tool_calls",
+                        message=SimpleNamespace(
+                            content="",
+                            reasoning_content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    id="call_fast",
+                                    function=SimpleNamespace(
+                                        name="cad_probe",
+                                        arguments=json.dumps({"code": good_script}),
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+                ]
+            )
+
+    ep_client = _EarlyProbeClient()
+    s_ep = QwenCadAgent(config=cfg_tools, client=ep_client).generate_cad(
+        "Plate with hole", views, None, tmp_path / "early_probe.stp", facts=facts, case_name="case_ep"
+    )
+    assert s_ep.turns_used == 1
+    assert not s_ep.used_fallback
+    assert len(ep_client.calls) == 1
+    assert inspect_step_file(tmp_path / "early_probe.stp").through_holes_genus == 1
+
+    # 3. XML <tool_call> fallback + server 400 tool_call_parser graceful downgrade
+    from openai import BadRequestError
+
+    class _FakeToolBadReq(BadRequestError):
+        def __init__(self, msg: str):
+            Exception.__init__(self, msg)
+
+    class _XmlAnd400Client:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            idx = len(self.calls) - 1
+            if idx == 0:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            message=SimpleNamespace(
+                                content=(
+                                    "<tool_call>\n<function=measure_ortho_features>\n"
+                                    "<parameter=view>\nview_4_top\n</parameter>\n</function>\n</tool_call>"
+                                ),
+                                reasoning_content=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ]
+                )
+            if idx == 1 and "tools" in kwargs:
+                raise _FakeToolBadReq("400 auto-tool-choice requires --tool-call-parser")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=good_script, reasoning_content=None, tool_calls=None),
+                    )
+                ]
+            )
+
+    x_client = _XmlAnd400Client()
+    s_x = QwenCadAgent(config=cfg_tools, client=x_client).generate_cad(
+        "Plate with hole", views, None, tmp_path / "xml_and_400.stp", facts=facts, case_name="case_x400"
+    )
+    assert not s_x.used_fallback
+    assert s_x.turns_used == 1
+    assert len(x_client.calls) == 3
+    assert "tools" not in x_client.calls[2]
+    assert inspect_step_file(tmp_path / "xml_and_400.stp").through_holes_genus == 1
+
+    # 4. Turn-0 Best-of-K=2 picks higher-scoring solid cleanly
+    bok_client = _FakeOpenAIClient(
+        lambda idx, kw: good_script if kw.get("seed") == 43 else no_hole_script
+    )
+    cfg_bok = _test_config(enable_tools=False, best_of_k=2, seed=42, iou_early_exit=0.90)
+    s_bok = QwenCadAgent(config=cfg_bok, client=bok_client).generate_cad(
+        "Plate with hole", views, None, tmp_path / "bok.stp", facts=facts, case_name="case_bok"
+    )
+    assert s_bok.turns_used == 1
+    assert not s_bok.used_fallback
+    assert len(bok_client.completions.calls) == 2
+    assert sorted(c["seed"] for c in bok_client.completions.calls) == [42, 43]
+    assert inspect_step_file(tmp_path / "bok.stp").through_holes_genus == 1
